@@ -22,8 +22,8 @@
  *
  * Status: v1rc. The API has few users and may still change before v1.0.
  *
- * Copyright (c) 2026 Dawid SQ6EMM. Noncommercial use only.
- * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * Copyright (c) 2026 Dawid SQ6EMM.
+ * SPDX-License-Identifier: MIT
  *
  * This header is original work. It contains no Icom code and grants no rights to
  * any Icom firmware. "Icom", "IC-705", "IC-9700" are trademarks of Icom Inc.;

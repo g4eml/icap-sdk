@@ -162,9 +162,10 @@ Staging: **S1** DIGI label + `decode_out` · **S2** audio + real decode · **S3*
 
 ## License & notices
 
-**Noncommercial.** This SDK — the [`icap.h`](icap.h) header and this documentation —
-is licensed under the **PolyForm Noncommercial License 1.0.0** (free for hobby,
-research and educational use; commercial use is not granted). See [`LICENSE`](LICENSE).
+The SDK — the [`icap.h`](icap.h) header and this documentation — is **MIT** licensed
+(see [`LICENSE`](LICENSE)). MIT keeps the header conflict-free, so apps under any
+license (including GPL decoders derived from WSJT-X) can include it. **Apps under
+[`apps/`](apps/) carry their own licenses** — see each app directory's own `LICENSE`.
 
 - This repository is **original work**. It contains **no Icom code** and grants
   **no rights to any Icom firmware**; it only describes an application interface to
