@@ -160,6 +160,17 @@ Staging: **S1** DIGI label + `decode_out` · **S2** audio + real decode · **S3*
 
 ---
 
-## License
+## License & notices
 
-MIT — see [`LICENSE`](LICENSE). The reference firmware/loader is published separately.
+**Noncommercial.** This SDK — the [`icap.h`](icap.h) header and this documentation —
+is licensed under the **PolyForm Noncommercial License 1.0.0** (free for hobby,
+research and educational use; commercial use is not granted). See [`LICENSE`](LICENSE).
+
+- This repository is **original work**. It contains **no Icom code** and grants
+  **no rights to any Icom firmware**; it only describes an application interface to
+  independently developed custom firmware.
+- *Icom*, *IC-705* and *IC-9700* are trademarks of **Icom Inc.** This project is
+  **independent and not affiliated with, authorized by, or endorsed by Icom**.
+- Provided as is, without warranty. Modifying radio firmware is done at your own
+  risk and your own responsibility for complying with local regulations and your
+  amateur-radio licence. The reference firmware/loader is published separately.
