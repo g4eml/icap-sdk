@@ -137,7 +137,7 @@ TX is only possible when the owner has enabled app-TX in the radio menu. A hard
 timeout and STOP always end transmission. You set nothing about the radio — the
 owner tunes to a legal frequency; you only key and feed audio.
 
-### Network (WLAN station)
+### Network (IC-705 WLAN station / IC-9700 wired LAN)
 ```c
 int icap_net_status(void);                    /* 0 = connected to an AP with an IP */
 int icap_net_open(const char *host, uint32_t port, uint32_t flags, uint32_t timeout_ms);
@@ -151,7 +151,9 @@ TLS connection (encryption is done by the radio's WLAN module). At most 2
 connections; anything left open is closed when the app exits. Calls return
 `ICAP_E_NONET`, `ICAP_E_DNS`, `ICAP_E_CONN` or `ICAP_E_TIMEOUT` instead of blocking,
 and STOP ends a pending call. Server certificates are not verified yet — don't
-send secrets.
+send secrets. On the **IC-9700** the same calls use the wired LAN port (DHCP or static
+IP from the radio's network settings); there is no TLS there, so `ICAP_NET_TLS` returns
+an error — use plain HTTP on a local network.
 
 ### Popup window
 ```c
@@ -185,8 +187,9 @@ probe with e.g. `icap_tx_available()` or `icap_audio_rate() > 0`.
 - Apps that use the v1rc services are packed with header ABI **3** and need firmware
   with the v1rc loader; older loaders refuse them cleanly.
 
-The same `*.APP` runs on IC-705 (E/J) and IC-9700; branch on `icap_radio_id()`
-for model-specific behaviour.
+A small, relocatable `*.APP` runs on IC-705 (E/J) and IC-9700 alike; branch on
+`icap_radio_id()` for model-specific behaviour. Large apps (the decoders) are built
+per radio, because the app window, stack and data-region sizes differ.
 
 ---
 
@@ -197,7 +200,8 @@ The goal is a digital-modes platform: apps are pluggable **decoders** and
 becomes **DIGI**).
 
 - **RX decode:** `icap_audio_read()` → your decoder → `icap_decode_out()` on the
-  native DECODE screen. Q65-60, JT4, PI4 and FT8 decoders run on the IC-705 E *(implemented)*.
+  native DECODE screen. Q65-60, JT4, PI4 and FT8 decoders *(implemented, IC-705 E and
+  IC-9700)* — see [`apps/`](apps/).
 - **TX beacons:** generate a waveform → `icap_tx_begin / tx_write / tx_end`.
   First targets: **Q65**, **JT4G**. TX stays owner-gated with a timeout.
 - **Decoder picker:** the RTTY button cycles through the registered decoder modes. *(implemented)*
@@ -207,7 +211,9 @@ becomes **DIGI**).
   PCM buffers), minimal allocation, NEON where available.
 
 Status: S1 `decode_out`, S2 audio + real decode and S4 decoder picker are done on the
-IC-705 E; the IC-9700 port of the v1rc loader is in progress; S3 TX + beacon is next.
+IC-705 E and the IC-9700 (on the IC-9700 the loader runtime is a file on the SD card
+that the firmware loads at start-up, so it can be updated without reflashing);
+S3 TX + beacon is next.
 
 ---
 
