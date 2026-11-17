@@ -197,8 +197,7 @@ The goal is a digital-modes platform: apps are pluggable **decoders** and
 becomes **DIGI**).
 
 - **RX decode:** `icap_audio_read()` → your decoder → `icap_decode_out()` on the
-  native DECODE screen. Q65-60, JT4 and PI4 decoders run on the IC-705 E *(implemented)*;
-  FT8 later.
+  native DECODE screen. Q65-60, JT4, PI4 and FT8 decoders run on the IC-705 E *(implemented)*.
 - **TX beacons:** generate a waveform → `icap_tx_begin / tx_write / tx_end`.
   First targets: **Q65**, **JT4G**. TX stays owner-gated with a timeout.
 - **Decoder picker:** the RTTY button cycles through the registered decoder modes. *(implemented)*
