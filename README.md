@@ -174,7 +174,9 @@ int icap_net_recv(int h, void *buf, uint32_t len, uint32_t timeout_ms); /* 0 = c
 int icap_net_close(int h);
 int icap_net_error(void);                     /* last raw WLAN-module code (diagnostics) */
 ```
-`host` is a name or a dotted IPv4 address; `ICAP_NET_TLS` gives an HTTPS-capable
+`host` is a name or a dotted IPv4 address. `ICAP_NET_UDP` opens a connected UDP
+datagram socket (one `icap_net_send` = one datagram, no TLS) — for reporting/telemetry.
+`ICAP_NET_TLS` gives an HTTPS-capable
 TLS connection (encryption is done by the radio's WLAN module). At most 2
 connections; anything left open is closed when the app exits. Calls return
 `ICAP_E_NONET`, `ICAP_E_DNS`, `ICAP_E_CONN` or `ICAP_E_TIMEOUT` instead of blocking,
@@ -238,8 +240,10 @@ becomes **DIGI**).
 - **Autostart:** `AUTORUN.CFG` on the SD card (owner opt-in) — a radio that boots
   straight into a Q65 monitor or beacon. *(implemented)*
 - **WSPR:** a WSPR-2 decoder and beacon fit on-chip *(validated, being wired in)*.
-- **Spotting:** reporting received stations to a network service, station identity
-  from `@MYCALL` / `@MYLOC` and the true frequency from `@FREQ` *(planned)*.
+- **Spotting:** reporting received stations to a network service over UDP, station
+  identity from `@MYCALL` / `@MYLOC` and the true on-air frequency (transverter-aware)
+  from `@FREQ`, sent only when the call and locator are set *(implemented, IC-705;
+  IC-9700 being finalized)*.
 - **Performance:** very limited resources — fixed-point DSP, streaming (no full
   PCM buffers), minimal allocation, NEON where available.
 

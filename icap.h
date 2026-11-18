@@ -102,6 +102,7 @@ struct icap_header {
 
 #define ICAP_NET_TLS   0x1  /* icap_net_open: TLS connection (HTTPS)        */
 #define ICAP_NET_NOSNI 0x2  /* TLS without sending/checking the host name   */
+#define ICAP_NET_UDP   0x4  /* connected UDP datagram socket: one send = one datagram, no TLS */
 
 /* Layout below is binary ABI - do not reorder. */
 struct icap_meminfo {
