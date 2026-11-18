@@ -126,6 +126,28 @@ DECODE screen for decodes only — WSJT-X style lines such as
 `1859 -15  2.6  997 :  VK7MO K6QPV DM12` — and put status text on the app window
 (`icap_set_line`) or in a log file.
 
+**App config (`<NAME>.CFG`).** An app may read a text file named after it (e.g.
+`Q65.CFG`) from its folder with the normal file API, one `key=value` per line.
+The reference decoders use `flo=`/`fhi=` (tone-0 search range, Hz), `sub=` (JT4/Q65
+submode) and `scope=<lo>-<hi>` or `scope=<Hz>` (the DECODE mini-scope span, Hz).
+These are app conventions, not firmware — pick your own keys.
+
+### Station identity & radio state (read-only virtual files)
+```c
+/* opened with the normal file API; each returns short UTF-8 text, empty if not set */
+icap_open("@MYCALL", ICAP_O_READ);   /* the radio's MY call sign                      */
+icap_open("@MYLOC",  ICAP_O_READ);   /* 6-char Maidenhead locator from the radio's    */
+                                     /*   position (GPS or a manual entry); empty = none */
+icap_open("@CLOCK",  ICAP_O_READ);   /* UTC / seconds-in-period, for scheduling        */
+icap_open("@FREQ",   ICAP_O_READ);   /* the true on-air frequency (Hz) + mode, with any */
+                                     /*   transverter offset applied                    */
+icap_open("@TX",     ICAP_O_READ);   /* last transmission's status, for diagnostics     */
+```
+These let a beacon or a spotting app read who/where the station is and what it is on,
+without the app storing any of it. A name starting with `@` is reserved: firmware
+without this feature rejects it with `ICAP_E_NAME`, so probe once and fall back to
+your own config keys (e.g. `call=`, `loc=`) if it is absent.
+
 ### Transmit (gated)
 ```c
 int  icap_tx_available(void);                /* 1 if this firmware offers TX */
@@ -133,9 +155,15 @@ int  icap_tx_begin(void);                    /* key TX; <0 if owner hasn't enabl
 int  icap_tx_write(const int16_t *buf, int nsamp); /* 8 kHz mono -> modulator */
 void icap_tx_end(void);                      /* unkey                        */
 ```
-TX is only possible when the owner has enabled app-TX in the radio menu. A hard
-timeout and STOP always end transmission. You set nothing about the radio — the
-owner tunes to a legal frequency; you only key and feed audio.
+TX is gated: the owner opts in per app (the reference apps use `beacon=1` in the
+app's `<NAME>.CFG`), and the radio's own TX safety always applies — PTT lock, the
+TX time-out timer, band/out-of-band limits and any transverter inhibit can refuse or
+end a transmission at any moment, and STOP / EXIT / the mic PTT end it immediately.
+You set nothing about the radio: the owner tunes to a legal frequency and sets the
+power and the DATA modulation source; you only key and feed 8 kHz audio. Transmission
+is **period-aligned** — the firmware keys at the mode's time-slot boundary, so the
+radio clock must be set (the beacon waits for the clock to lock). Build the audio
+with your own encoder; the station call and locator come from `@MYCALL` / `@MYLOC`.
 
 ### Network (IC-705 WLAN station / IC-9700 wired LAN)
 ```c
@@ -202,18 +230,23 @@ becomes **DIGI**).
 - **RX decode:** `icap_audio_read()` → your decoder → `icap_decode_out()` on the
   native DECODE screen. Q65-60, JT4, PI4 and FT8 decoders *(implemented, IC-705 E and
   IC-9700)* — see [`apps/`](apps/).
-- **TX beacons:** generate a waveform → `icap_tx_begin / tx_write / tx_end`.
-  First targets: **Q65**, **JT4G**. TX stays owner-gated with a timeout.
+- **TX beacons:** generate a waveform → `icap_tx_begin / tx_write / tx_end`, station
+  identity from `@MYCALL` / `@MYLOC`, period-aligned. The transmit path and a tone
+  bench test run on real hardware *(IC-9700; IC-705 built)*; Q65 / JT4 / PI4 / FT8 /
+  WSPR beacon waveforms are being wired into the apps.
 - **Decoder picker:** the RTTY button cycles through the registered decoder modes. *(implemented)*
 - **Autostart:** `AUTORUN.CFG` on the SD card (owner opt-in) — a radio that boots
   straight into a Q65 monitor or beacon. *(implemented)*
+- **WSPR:** a WSPR-2 decoder and beacon fit on-chip *(validated, being wired in)*.
+- **Spotting:** reporting received stations to a network service, station identity
+  from `@MYCALL` / `@MYLOC` and the true frequency from `@FREQ` *(planned)*.
 - **Performance:** very limited resources — fixed-point DSP, streaming (no full
   PCM buffers), minimal allocation, NEON where available.
 
-Status: S1 `decode_out`, S2 audio + real decode and S4 decoder picker are done on the
-IC-705 E and the IC-9700 (on the IC-9700 the loader runtime is a file on the SD card
-that the firmware loads at start-up, so it can be updated without reflashing);
-S3 TX + beacon is next.
+Status: decode, the decoder picker, the app window, the clock, files, networking and
+the TX path all run on the IC-705 E and the IC-9700 (on the IC-9700 the loader runtime
+is a file on the SD card that the firmware loads at start-up, so it can be updated
+without reflashing). TX beacons and the WSPR decoder are being wired into the apps.
 
 ---
 
