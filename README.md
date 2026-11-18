@@ -155,8 +155,8 @@ int  icap_tx_begin(void);                    /* key TX; <0 if owner hasn't enabl
 int  icap_tx_write(const int16_t *buf, int nsamp); /* 8 kHz mono -> modulator */
 void icap_tx_end(void);                      /* unkey                        */
 ```
-TX is gated: the owner opts in per app (the reference apps use `beacon=1` in the
-app's `<NAME>.CFG`), and the radio's own TX safety always applies — PTT lock, the
+TX is gated: the owner turns beacon / TX mode on from the radio's own UI (a button),
+and the radio's TX safety always applies — PTT lock, the
 TX time-out timer, band/out-of-band limits and any transverter inhibit can refuse or
 end a transmission at any moment, and STOP / EXIT / the mic PTT end it immediately.
 You set nothing about the radio: the owner tunes to a legal frequency and sets the
