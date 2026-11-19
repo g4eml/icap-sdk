@@ -1,0 +1,10 @@
+kgoba/ft8_lib  https://github.com/kgoba/ft8_lib
+commit 9fec6ca39886edbf96f4f5e71edc76da5074e871 (2025-08-23), MIT (LICENSE)
+vendored, unmodified: ft8/{constants,crc,message,text,encode}.[ch], ft8/decode.h (types only), ft8/debug.h
+  constants: Costas / Gray / LDPC tables; crc: CRC-14; message + text: 77-bit unpacking (and the hash interface);
+  encode: ft8_encode (tones of a decoded message, for subtraction and SNR)
+not taken: common/ (monitor.c waterfall, wav, audio), fft/ (kiss_fft), demo/, ft8/decode.c and ft8/ldpc.c.
+../ft8dec.c re-implements the waterfall (own FFT, streamed from SD, subtraction) and carries adapted copies of
+decode.c's ft8_sync_score / ftx_find_candidates (abort poll added, identical results) and ldpc.c's bp_decode
+(WSJT-X early stop added).
+ft8_port.h is force-included (-include) when compiling the vendored .c files: libc subset from ft8_port.c, logging off.

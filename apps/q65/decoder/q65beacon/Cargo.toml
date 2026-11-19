@@ -1,0 +1,45 @@
+# q65beacon — segmented, backing-store Q65-60D beacon decoder for the IC-9700 ICAP app.
+# Links mfsk-core (GPL-3.0-or-later) for the QRA(15,65)/GF(64) FEC + Q65 message codec.
+[package]
+name = "q65beacon"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Low-RAM segmented Q65-60D decoder (streaming Goertzel front-end + SD backing store) reusing mfsk-core's QRA decoder"
+
+[lib]
+name = "q65beacon"
+# rlib for the host CLI/tests; staticlib so the ICAP C shim can link it.
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+# Patched copy: `q65` feature no longer forces fft-rustfft/std.
+mfsk-core = { path = "../mfsk-core", default-features = false, features = ["q65"] }
+num-traits = { version = "0.2", features = ["libm"], default-features = false }
+# On-radio free-list allocator over the ABI v2 region (radio feature only).
+linked_list_allocator = { version = "0.10", default-features = false, features = ["use_spin"], optional = true }
+
+[features]
+default = ["std"]
+# Host build: std file I/O, the CLI harness, the path-based C ABI.
+std = ["mfsk-core/std"]
+# no_std bare-metal build: just `alloc` + the core decode over caller traits.
+alloc = ["mfsk-core/alloc"]
+# Supplies a panic handler + stub allocator so the no_std staticlib links
+# standalone (for size measurement / compile proof). On the radio the C
+# shim/runtime provides these instead; do NOT enable `bare` there.
+bare = []
+# On-radio build: real global allocator (region) + panic handler + callback C ABI.
+# Mutually exclusive with `bare` and `std`.
+radio = ["alloc", "dep:linked_list_allocator"]
+# Counting global allocator for peak-live-bytes measurement (host + qemu).
+meter = []
+
+[[bin]]
+name = "q65beacon_cli"
+path = "src/bin/q65beacon_cli.rs"
+required-features = ["std"]
+
+[profile.release]
+opt-level = 3
+panic = "abort"

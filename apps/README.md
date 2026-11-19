@@ -5,15 +5,19 @@ Each app is its own project in a subdirectory, with **its own `LICENSE`**.
 The SDK header [`../icap.h`](../icap.h) is MIT, so an app may use any license,
 including GPL. Build each app against `../icap.h` and pack it into a `*.APP`.
 
-| App | What | Radios | Status | License (planned) |
-|-----|------|--------|--------|-------------------|
-| **Q65** | Q65-60 decoder mode (A..E), WSJT-X-style decode lines, SNR in the WSJT-X 2500 Hz convention; Q65 beacon | IC-705 E, IC-9700 | runs on the radio (decode + beacon confirmed) | GPL-3.0 (WSJT-X-derived) |
-| **FT8** | FT8 decoder mode, 15 s periods, `~` lines like WSJT-X; FT8 beacon | IC-705 E, IC-9700 | decode runs on the radio; beacon emulation-tested | MIT parts (ft8_lib) + own code |
-| **JT4** | JT4 A..G decoder mode (EME/microwave), `$` lines like WSJT-X; JT4 beacon | IC-705 E, IC-9700 | decode runs on the radio; beacon emulation-tested | GPL-3.0 (WSJT-X-derived) |
-| **PI4** | PI4 microwave-beacon decoder mode; PI4 beacon (with CW ID and carrier) | IC-705 E, IC-9700 | runs on the radio (beacon confirmed) | per upstream |
-| **WSPR** | WSPR-2 beacon (decoder: later) | IC-705 E, IC-9700 | runs on the radio | own code |
-| **FETCH** | HTTP(S) downloader: syncs a server folder to the SD card (MD5SUMS check, firmware `.dat` to the radio folder) | IC-705 (WLAN, HTTPS) / IC-9700 (wired LAN, HTTP only) | runs on both radios | MIT |
-| **CLOCK**, **SYSINFO**, **SPEED** | small examples: clock/window, platform info, memory speed test | both | runs on the radio | MIT |
+| App | What | Radios | Status | License |
+|-----|------|--------|--------|---------|
+| [**Q65**](q65/) | Q65-60 decoder mode (A..E), WSJT-X-style decode lines, SNR in the WSJT-X 2500 Hz convention; Q65 beacon | IC-705 E, IC-9700 | runs on the radio (decode + beacon confirmed) | GPL-3.0-or-later (derived from WSJT-X; uses mfsk-core) |
+| [**FT8**](ft8/) | FT8 decoder mode, 15 s periods, `~` lines like WSJT-X; FT8 beacon | IC-705 E, IC-9700 | decode runs on the radio; beacon emulation-tested | GPL-3.0-or-later as a whole; the decoder core and the vendored ft8_lib are MIT |
+| [**JT4**](jt4/) | JT4 A..G decoder mode (EME/microwave), `$` lines like WSJT-X; JT4 beacon | IC-705 E, IC-9700 | decode runs on the radio; beacon emulation-tested | GPL-3.0-or-later (derived from WSJT-X) |
+| [**PI4**](pi4/) | PI4 microwave-beacon decoder mode; PI4 beacon (with CW ID and carrier) | IC-705 E, IC-9700 | runs on the radio (beacon confirmed) | GPL-3.0-or-later as a whole; the encoder is MIT (own code from the OZ2M / DJ5HG specification) |
+| [**WSPR**](wspr/) | WSPR-2 beacon (decoder: later) | IC-705 E, IC-9700 | runs on the radio | GPL-3.0-or-later (encoder derived from WSJT-X) |
+| [**FETCH**](fetch/) | HTTP(S) downloader: syncs a server folder to the SD card (MD5SUMS check, firmware `.dat` to the radio folder) | IC-705 (WLAN, HTTPS) / IC-9700 (wired LAN, HTTP only) | runs on both radios | MIT |
+| [**CLOCK**](clock/), [**SPEED**](speed/) | small examples: clock/window, memory speed test | both | runs on the radio | MIT |
+| **SYSINFO** | platform info for the bench (reads firmware internals) | both | binary only, source not published | MIT |
+
+[`digi-common/`](digi-common/) holds the code the decoder and beacon apps share (app shell, beacon
+driver, spotting glue, audio synthesizer); it is GPL-3.0-or-later.
 
 Every decoder reports its decodes to PSKReporter through the firmware's `@SPOT` service, and the
 beacon is armed by the owner on the radio (long press of the mode tile; a red frame on the
@@ -27,8 +31,11 @@ go to the app window and a `<MODE>DEC.TXT` log. Each decoder has an optional
 `<MODE>.CFG` (search range etc.). Typical decode time on the IC-705 is a few seconds.
 On the IC-9700 it also depends on the SD card speed, because captures are written to it.
 
-Source code for the apps will be published here; until then the table describes what
-exists.
+The source code of each app is in its subdirectory, with a `README.md` (what it is, where the
+code comes from), the full license text in `LICENSE` and a `build.sh` that builds the `*.APP` for
+each supported radio with the public [`../tools/`](../tools/). The C builds are reproducible: the
+same toolchain gives the same file, byte for byte; Q65 also needs the documented build path for
+its Rust decoder (see [`q65/README.md`](q65/README.md)).
 
 > Apps that reuse or derive from GPL-licensed code (e.g. WSJT-X) **must** be
 > distributed under the GPL and carry the GPL text in their own directory. MIT on

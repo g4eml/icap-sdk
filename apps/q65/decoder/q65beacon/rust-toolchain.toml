@@ -1,0 +1,7 @@
+# The toolchain the published Q65.APP builds were made with (rustc 1.102.0-nightly 5df8c02af 2026-11-16).
+# Nightly is needed for -Z build-std (size-optimised core/alloc) and -C panic=immediate-abort.
+[toolchain]
+channel = "nightly-2026-11-17"
+components = ["rust-src"]
+targets = ["armv7a-none-eabihf"]
+profile = "minimal"

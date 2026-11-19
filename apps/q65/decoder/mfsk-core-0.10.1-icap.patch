@@ -1,0 +1,251 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -96,7 +96,7 @@
+     "dep:rayon",
+ ]
+ profile-coarse = ["std"]
+-q65 = ["fft-rustfft"]
++q65 = []
+ serde = ["dep:serde"]
+ std = ["alloc"]
+ uvpacket = [
+--- a/src/fec/qra/code.rs
++++ b/src/fec/qra/code.rs
+@@ -28,6 +28,12 @@
+ //! the Rust port and the upstream source stays trivial. The
+ //! `non_snake_case` lint is silenced for those fields.
+ 
++#[cfg(not(feature = "std"))]
++#[allow(unused_imports)]
++use alloc::{boxed::Box, format, string::String, string::ToString, vec, vec::Vec};
++#[cfg(not(feature = "std"))]
++#[allow(unused_imports)]
++use num_traits::Float;
+ use super::{npfwht, pdmath};
+ 
+ /// Code type discriminator, mirroring the C `QRATYPE_*` defines from
+--- a/src/fec/qra/fast_fading.rs
++++ b/src/fec/qra/fast_fading.rs
+@@ -38,6 +38,12 @@
+ //! same calibration tables in `super::fading_tables` without
+ //! reinterpretation.
+ 
++#[cfg(not(feature = "std"))]
++#[allow(unused_imports)]
++use alloc::{boxed::Box, format, string::String, string::ToString, vec, vec::Vec};
++#[cfg(not(feature = "std"))]
++#[allow(unused_imports)]
++use num_traits::Float;
+ use super::fading_tables::{GAUSS_LEN, GAUSS_TAPS, LORENTZ_LEN, LORENTZ_TAPS};
+ use super::pdmath;
+ use super::{QraCode, QraCodeType};
+@@ -179,7 +185,7 @@
+     // EsNoMetric = AWGN * 10^(8*log(B90)/log(240) / 10).
+     let b90 = b90_ts / TS_QRA64;
+     let degrade_db = 8.0 * b90.ln() / MAX_SPREAD_HZ.ln();
+-    let es_no_metric = decoder_es_no_metric * 10_f32.powf(degrade_db / 10.0);
++    let es_no_metric = decoder_es_no_metric * (degrade_db * (core::f32::consts::LN_10 / 10.0)).exp();
+ 
+     // Average bin energy = noise variance + a known signal-fraction
+     // overestimate. The overestimate cancels out in `esnodb_fast_fading`.
+@@ -251,6 +257,116 @@
+     }
+ }
+ 
++/// Precomputed, b90-dependent context for the **streaming** per-row
++/// fast-fading metric. Build once per `(submode, b90, model)` with
++/// [`fast_fading_row_ctx`], then apply to each symbol's single wide
++/// row with [`fast_fading_row`]. This lets a memory-constrained caller
++/// (e.g. the IC-9700 ICAP app) stream the wide-energy spectrogram from
++/// an SD backing store instead of holding all `N` symbol rows resident:
++/// the per-symbol intrinsic depends only on that symbol's own row,
++/// because the leading/trailing `M`-bin pad makes each fading window
++/// self-contained. Numerically identical to [`intrinsics_fast_fading`].
++pub struct FastFadingRowCtx {
++    big_m: usize,
++    bpt: usize,
++    bins_per_symbol: usize,
++    hlen: usize,
++    weights: Vec<f32>,
++}
++
++/// Build the per-row context. `raw_mean_energy` is
++/// `Sigma(all wide-energy bins) / (N * bins_per_symbol)` — the
++/// b90-independent global mean the caller accumulates while streaming
++/// the spectrogram out to its backing store. All other arguments match
++/// [`intrinsics_fast_fading`].
++pub fn fast_fading_row_ctx(
++    submode: u8,
++    b90_ts: f32,
++    model: FadingModel,
++    decoder_es_no_metric: f32,
++    raw_mean_energy: f32,
++) -> FastFadingRowCtx {
++    let big_m = 64usize;
++    let bpt = bins_per_tone(submode);
++    let bins_per_symbol = big_m * (2 + bpt);
++    let hidx = table_index(b90_ts);
++    let (hlen, taps) = match model {
++        FadingModel::Gaussian => (GAUSS_LEN[hidx], GAUSS_TAPS[hidx]),
++        FadingModel::Lorentzian => (LORENTZ_LEN[hidx], LORENTZ_TAPS[hidx]),
++    };
++    debug_assert_eq!(taps.len(), hlen, "fading table length mismatch");
++    let b90 = b90_ts / TS_QRA64;
++    let degrade_db = 8.0 * b90.ln() / MAX_SPREAD_HZ.ln();
++    let es_no_metric = decoder_es_no_metric * (degrade_db * (core::f32::consts::LN_10 / 10.0)).exp();
++    let noise_var = raw_mean_energy / (1.0 + es_no_metric / bins_per_symbol as f32);
++    let mut weights = vec![0.0_f32; hlen];
++    for k in 0..hlen {
++        let t = taps[k] * es_no_metric;
++        weights[k] = t / (1.0 + t) / noise_var;
++    }
++    FastFadingRowCtx { big_m, bpt, bins_per_symbol, hlen, weights }
++}
++
++/// The part of [`fast_fading_row_ctx`] that does not depend on the mean energy, Lorentzian model:
++/// the calibrated tap row for `b90_ts` and the Es/No metric degraded for that spread.  A caller that
++/// streams the spectrogram (and so learns the mean energy last) computes `t/(1+t)` weights from
++/// these, filters each row as [`fast_fading_row`] does, and divides by
++/// `noise_var = mean / (1 + es_no_metric / bins_per_symbol)` afterwards.
++pub struct LorentzTaps {
++    pub es_no_metric: f32,
++    pub taps: &'static [f32],
++}
++
++pub fn lorentz_taps(b90_ts: f32, decoder_es_no_metric: f32) -> LorentzTaps {
++    let hidx = table_index(b90_ts);
++    let b90 = b90_ts / TS_QRA64;
++    let degrade_db = 8.0 * b90.ln() / MAX_SPREAD_HZ.ln();
++    let es_no_metric = decoder_es_no_metric * (degrade_db * (core::f32::consts::LN_10 / 10.0)).exp();
++    LorentzTaps { es_no_metric, taps: &LORENTZ_TAPS[hidx][..LORENTZ_LEN[hidx]] }
++}
++
++
++/// Compute one symbol's `M` intrinsic probabilities from that symbol's
++/// single wide-energy row (`row.len() == bins_per_symbol`) into `out`
++/// (`out.len() == M`). Mirrors the per-symbol body of
++/// [`intrinsics_fast_fading`] exactly, but indexed within one row.
++pub fn fast_fading_row(ctx: &FastFadingRowCtx, row: &[f32], out: &mut [f32]) {
++    let big_m = ctx.big_m;
++    let bpt = ctx.bpt;
++    let hlen = ctx.hlen;
++    assert_eq!(row.len(), ctx.bins_per_symbol, "fast_fading_row: row must be bins_per_symbol");
++    assert_eq!(out.len(), big_m, "fast_fading_row: out must be M");
++    let hhsz = hlen - 1;
++    let hlast = 2 * hhsz;
++    // Central bin of tone 0 sits at local offset `big_m` within the row.
++    let first_bin = big_m - (hlen - 1);
++    let mut max_logp = 0.0_f32;
++    for k in 0..big_m {
++        let centre = first_bin + k * bpt;
++        let mut acc = 0.0_f32;
++        for j in 0..hhsz {
++            acc += ctx.weights[j] * (row[centre + j] + row[centre + hlast - j]);
++        }
++        acc += ctx.weights[hhsz] * row[centre + hhsz];
++        out[k] = acc;
++        if acc > max_logp {
++            max_logp = acc;
++        }
++    }
++    let mut sum = 0.0_f32;
++    for v in out.iter_mut() {
++        let x = (*v - max_logp).clamp(-85.0, 85.0);
++        let e = x.exp();
++        *v = e;
++        sum += e;
++    }
++    let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
++    for v in out.iter_mut() {
++        *v *= inv;
++    }
++    pdmath::norm(out);
++}
++
+ /// Estimate the decoded codeword's Es/No (in dB) from the same wide
+ /// spectrogram passed to [`intrinsics_fast_fading`] plus the decoded
+ /// hard-decision codeword.
+--- a/src/fec/qra/mod.rs
++++ b/src/fec/qra/mod.rs
+@@ -40,5 +40,5 @@
+ pub mod q65;
+ 
+ pub use code::{DecoderScratch, ExtrinsicResult, QraCode, QraCodeType};
+-pub use fast_fading::{FadingModel, FastFadingState, esnodb_fast_fading, intrinsics_fast_fading};
++pub use fast_fading::{LorentzTaps, lorentz_taps, FadingModel, FastFadingRowCtx, FastFadingState, esnodb_fast_fading, fast_fading_row, fast_fading_row_ctx, intrinsics_fast_fading};
+ pub use q65::{Q65_LLH_THRESHOLD, Q65Codec, Q65DecodeError};
+--- a/src/fec/qra/q65.rs
++++ b/src/fec/qra/q65.rs
+@@ -25,6 +25,12 @@
+ //! [`QraCode::mfsk_bessel_metric`] front-end, which is the core path
+ //! used by every Q65 decode regardless of subsequent AP refinement.
+ 
++#[cfg(not(feature = "std"))]
++#[allow(unused_imports)]
++use alloc::{boxed::Box, format, string::String, string::ToString, vec, vec::Vec};
++#[cfg(not(feature = "std"))]
++#[allow(unused_imports)]
++use num_traits::Float;
+ use super::{DecoderScratch, ExtrinsicResult, QraCode, QraCodeType, pdmath};
+ 
+ /// CRC-6 generator polynomial: x^6 + x + 1 — matches the C reference.
+--- a/src/q65/ap_list.rs
++++ b/src/q65/ap_list.rs
+@@ -27,6 +27,12 @@
+ //! `q65_set_list2.f90` are intentionally out of scope here — they
+ //! are handled by separate generators (not yet ported).
+ 
++#[cfg(not(feature = "std"))]
++#[allow(unused_imports)]
++use alloc::{boxed::Box, format, string::String, string::ToString, vec, vec::Vec};
++#[cfg(not(feature = "std"))]
++#[allow(unused_imports)]
++use num_traits::Float;
+ use crate::fec::qra::Q65Codec;
+ use crate::fec::qra15_65_64::QRA15_65_64_IRR_E23;
+ use crate::msg::q65::pack77_to_symbols;
+--- a/src/q65/mod.rs
++++ b/src/q65/mod.rs
+@@ -68,20 +68,27 @@
+ //!   Communication", QEX 2022.
+ 
+ pub mod ap_list;
++#[cfg(feature = "fft-rustfft")]
+ pub mod decode_request;
+ pub mod protocol;
++#[cfg(feature = "fft-rustfft")]
+ pub mod rx;
++#[cfg(feature = "fft-rustfft")]
+ pub mod search;
++#[cfg(feature = "fft-rustfft")]
+ pub(crate) mod snr;
+ pub mod sync_pattern;
+ pub mod tx;
+ 
+ pub use ap_list::{MAX_AP_CODEWORDS, standard_qso_codewords};
++#[cfg(feature = "fft-rustfft")]
+ pub use decode_request::{DecodeRequest, MultiPeriodRequest, Q65SubMode, SniperRequest};
+ pub use protocol::{
+     Q65Fec, Q65a15, Q65a30, Q65a60, Q65a300, Q65b60, Q65c60, Q65d60, Q65d120, Q65e60, Q65e120,
+ };
++#[cfg(feature = "fft-rustfft")]
+ pub use rx::Q65Result;
++#[cfg(feature = "fft-rustfft")]
+ pub use search::{SearchParams, SyncCandidate, coarse_search};
+ pub use sync_pattern::{Q65_DATA_POSITIONS, Q65_SYNC_BLOCKS, Q65_SYNC_POSITIONS};
+ pub use tx::{
+--- a/src/q65/tx.rs
++++ b/src/q65/tx.rs
+@@ -14,6 +14,12 @@
+ //!    sync, so data symbols `0..=63` map to tones `1..=64`).
+ //! 4. Synthesise plain FSK (no GFSK shaping) at the Q65-30A baud.
+ 
++#[cfg(not(feature = "std"))]
++#[allow(unused_imports)]
++use alloc::{boxed::Box, format, string::String, string::ToString, vec, vec::Vec};
++#[cfg(not(feature = "std"))]
++#[allow(unused_imports)]
++use num_traits::Float;
+ use core::f32::consts::TAU;
+ 
+ use crate::engine::ModulationParams;

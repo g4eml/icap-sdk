@@ -16,5 +16,6 @@ Packer options: `--name` (up to 15 chars), `--models` (1 = IC-705, 2 = IC-9700, 
 `--stack`, `--abi 3` (app uses the v1rc services), `--background` (EXIT hides the window),
 `--autostart` (still needs `AUTORUN.CFG`), `--mode NAME[:usbd|keep]` (register a decoder mode).
 
-Very large apps (the reference decoders) need per-radio memory layouts and are built with the
-firmware tree; small apps like the example run on both radios unchanged.
+Most apps (FT8, JT4, PI4, WSPR, FETCH, CLOCK, SPEED and the example) are relocatable and run on both
+radios. Q65 is a large two-segment image linked for each radio's app memory layout; its build files
+(link scripts and `mkapp_split.py`) are in [`../apps/q65/`](../apps/q65/).

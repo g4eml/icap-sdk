@@ -1,0 +1,4 @@
+build/
+q65/decoder/mfsk-core/
+q65/decoder/mfsk-core-*.crate
+q65/decoder/q65beacon/target/
