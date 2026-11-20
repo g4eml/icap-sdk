@@ -5,13 +5,14 @@ Not an app: these files are compiled into [FT8](../ft8/), [JT4](../jt4/), [PI4](
 
 | File | What | SPDX |
 |---|---|---|
-| `digiapp.c` | the decoder app shell for the period-based modes (`-DDIGI_FT8`, `-DDIGI_JT4`, `-DDIGI_PI4`): capture each period to the SD card, decode the previous one, print decode lines, `<MODE>.CFG`, logs | GPL-3.0-or-later |
+| `digiapp.c` | the decoder app shell for the period-based modes (`-DDIGI_FT8`, `-DDIGI_JT4`, `-DDIGI_PI4`): capture each period to the SD card, decode the previous one, print decode lines, settings from `@MODECFG` and `<MODE>.CFG`, logs, QSO mode (FT8, JT4) | GPL-3.0-or-later |
+| `qso.h` | header-only QSO mode for FT8, JT4 and Q65: the owner taps a decoded line (`@QSO`), the app proposes the next standard message, a second tap sends it once (`@QTX0` / `@QTX1`, CQ: `@QTXC`); ADIF record through `@QLOG` | GPL-3.0-or-later |
 | `beacon.h` | header-only beacon driver: message from `@MYCALL` / `@MYLOC`, arming state from `@TX`, streaming through `icap_tx_*` | GPL-3.0-or-later |
 | `spot.h` | header-only spotting glue: writes one line per decode to `@SPOT` (the firmware reports to PSKReporter) | GPL-3.0-or-later |
 | `digi_util.c/.h` | freestanding helpers: math, FFT, buffered SD reader | GPL-3.0-or-later |
-| `msg77.c/.h` | WSJT-X 77-bit standard message packing (subset), after WSJT-X `packjt77.f90` | GPL-3.0-or-later |
+| `msg77.c/.h` | WSJT-X 77-bit standard message packing (subset: two calls + grid, report, `RRR`, `RR73`, `73`), after WSJT-X `packjt77.f90` | GPL-3.0-or-later |
 | `txsynth.c/.h` | streaming MFSK / GFSK audio synthesizer and period alignment (own code) | MIT |
-| `flags.sh` | compiler / linker flags shared by the build scripts | GPL-3.0-or-later |
+| `flags.sh` | compiler / linker flags shared by the build scripts (FT8, JT4, PI4, WSPR) | GPL-3.0-or-later |
 
 ## License
 

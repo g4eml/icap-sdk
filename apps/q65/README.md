@@ -4,7 +4,18 @@ Q65-60 decoder (submodes A..E) for the radio's DECODE screen: every UTC minute i
 SD card and decoded while the next one is captured; WSJT-X style lines
 (`HHMM SNR  DT FREQ :  MESSAGE`), SNR in the WSJT-X 2500 Hz convention. Decodes are reported
 through `@SPOT`. With the beacon armed by the owner, the same app transmits a Q65-60 beacon message
-built from `@MYCALL` / `@MYLOC`. Optional `Q65.CFG`: see the top of [`q65_705.c`](q65_705.c) and [`../../README.md`](../../README.md).
+built from `@MYCALL` / `@MYLOC`, in the Q65-60 submode the owner set on the radio (DECODE › SET ›
+SUBMODE, read from `@MODECFG`).
+
+**QSO mode** (new in 20261119v13; emulation-tested, not yet run on hardware): tap a decoded line
+and the app prints the next message of the standard sequence as `TX? ...`; tap that line and it is
+sent once, in the minute opposite to the other station's. With CQ armed on the radio the app calls
+`CQ <call> <grid4>` in every second minute. A completed QSO is appended to `ICAPQSO.ADI`. QSO
+answers and CQ always go out as **Q65-60D** - the decoder linked here decodes 60D only - whatever
+SUBMODE says (that setting applies to the beacon). Every transmission needs a tap by the owner; see
+"QSO mode" in [`../../README.md`](../../README.md) and [`../digi-common/qso.h`](../digi-common/qso.h).
+
+Optional `Q65.CFG`: see the top of [`q65_705.c`](q65_705.c) and [`../../README.md`](../../README.md).
 
 ## Sources and origin
 
@@ -14,7 +25,7 @@ built from `@MYCALL` / `@MYLOC`. Optional `Q65.CFG`: see the top of [`q65_705.c`
 | `q65enc.c/.h` | Q65 encoder after WSJT-X `lib/qra/q65/` (`genq65.f90`, `q65.c`, `qracodes.c`, code tables `qra15_65_64_irr_e23.c`) | GPL-3.0-or-later |
 | `decoder/q65beacon/` | the decoder (Rust, `no_std`): streaming low-memory port of the WSJT-X Q65 decode path - one-window FFT front end, Costas sync, fast-fading metric, QRA belief propagation, WSJT-X SNR | GPL-3.0-or-later |
 | `decoder/mfsk-core-0.10.1-icap.patch` | changes to the **mfsk-core** crate 0.10.1 by its authors, <https://github.com/jl1nie/mfsk-core>, a Rust port of the WSJT-X modes: `no_std` build of the Q65 parts and a per-row fast-fading metric. The decoder uses its QRA(15,65) code tables, fast-fading tables, CRC and Q65 message unpacking. `decoder/build_decoder.sh` downloads the unmodified crate from crates.io (checksum-pinned) and applies the patch | GPL-3.0-or-later |
-| [`../digi-common/`](../digi-common/) | beacon driver, spotting glue, synthesizer, `msg77.c` | GPL-3.0-or-later |
+| [`../digi-common/`](../digi-common/) | beacon driver, QSO mode, spotting glue, synthesizer, `msg77.c` | GPL-3.0-or-later |
 | `q65_split705.ld`, `q65_split9700.ld`, `mkapp_split.py`, `build.sh` | link scripts, packer and build script (below) | GPL-3.0-or-later / MIT (packer) |
 
 Q65 and the QRA codes: Nico Palermo **IV3NWV**, Joe Taylor **K1JT**, Steve Franke **K9AN** and the
@@ -47,6 +58,9 @@ WSJT Development Group. Derived from **WSJT-X**, (c) Joe Taylor K1JT et al., GPL
    ```sh
    sh build.sh          # -> build/705/Q65.APP (IC-705), build/9700/Q65.APP (IC-9700)
    ```
+
+   The app file `q65_705.c` is compiled for size as Thumb code on both radios (it is not the hot
+   path; the decoder library is).
 
 ### Why Q65 is built differently from the other apps
 

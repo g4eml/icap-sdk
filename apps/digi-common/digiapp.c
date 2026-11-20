@@ -20,8 +20,10 @@
  * are kept) and the newer minute is decoded.  Each decode is printed on the DECODE screen as
  *   "HHMM SNR  DT FREQ c  MESSAGE"  (WSJT-X layout, c = WSJT-X mode marker, HHMM = the minute it was sent in);
  *   only decodes go to the DECODE screen - status and errors go to the app window (line 2) and the log
- * and kept in <MODE>DEC.TXT (newest ~2 KB).  Optional <MODE>.CFG: "sub=G" (JT4 submode A..G), "flo=200",
- * "fhi=3000" (search range of tone 0, Hz).  Working memory = the loader's app data region (icap_heap()).
+ * and kept in <MODE>DEC.TXT (newest ~2 KB).  Settings: the radio's own for this mode (loader virtual file "@MODECFG",
+ * DECODE screen > SET: SUBMODE; one line "mode=JT4 sub=G pskr=1 [flo=200 fhi=3000] ... gen=<n>"), then the optional
+ * override file <MODE>.CFG, which wins: "sub=G" (JT4 submode A..G), "flo=200", "fhi=3000" (search range of tone 0,
+ * Hz).  Working memory = the loader's app data region (icap_heap()).
  * At most 3 files are open at once (capture, decode read, log).  Built only against the public SDK icap.h.
  */
 #include "icap.h"
@@ -63,8 +65,12 @@
 #define F_MAXCFG   3900                 /* tone 0 below 4 kHz - 50 Hz */
 #define MAXOUT     50
 #define PERIOD_WORD "period"
+#ifdef DIGI_HIST                        /* P4b, 9700: 4096 (~2 busy periods) - the QSO helper needs the window */
+#define HIST_SZ    DIGI_HIST
+#else
 #define HIST_SZ    6144                 /* ~3 busy periods of decodes in FT8DEC.TXT (was 8192; trimmed so the
                                          * integrated beacon encoder fits the 9700 window without touching the arena) */
+#endif
 #else
 #error "define DIGI_JT4, DIGI_PI4 or DIGI_FT8"
 #endif
@@ -122,7 +128,9 @@ static char *hhmm(char *d, int hh, int mm) { d = num(d, hh, 2, '0'); return num(
 static int stop(void) { return icap_should_stop(); }
 
 /* ---- config */
+#ifdef DIGI_JT4
 static int cfg_sub = 6;                          /* JT4G */
+#endif
 static float cfg_flo = 200.0f, cfg_fhi = 3000.0f;
 /* beacon (beacon=1): the app transmits instead of decoding; call=/loc= override @MYCALL/@MYLOC, txfreq= sets the
  * audio tone-0 Hz, cwshift= the PI4 FSK-CW shift Hz.  txlevel/txmax/txlimit are read by the loader, not here. */
@@ -135,15 +143,24 @@ static int kint(const char *s)                   /* digits after '=' */
 static void ktok(const char *s, char *out, int cap)  /* token after '=' (stops at blank/eol), upper-cased */
 { int k = 0; while (*s && *s != '=') s++; if (*s) s++; while (*s == ' ') s++;
   for (; *s > ' ' && k < cap - 1; s++) out[k++] = (*s >= 'a' && *s <= 'z') ? (char)(*s - 32) : *s; out[k] = 0; }
+/* P3a: first the radio's settings of this mode ("@MODECFG", an older loader has none), then <MODE>.CFG on top (the
+ * file wins).  Both are key=value text and go through the same parser. */
+#ifdef DIGI_JT4
+static int mc_gen = -1;                          /* gen= of @MODECFG at the last read: it changes with every setting */
+#endif
 static void read_cfg(void)
 {
-    char b[160]; int fd = icap_open(F_CFG, ICAP_O_READ);
-    if (fd < 0) return;
+    char b[160];
+  for (int pass = 0; pass < 2; pass++) {
+    int fd = icap_open(pass ? F_CFG : "@MODECFG", ICAP_O_READ);
+    if (fd < 0) continue;
     int n = icap_read(fd, b, sizeof b - 1); icap_close(fd);
-    if (n <= 0) return;
+    if (n <= 0) continue;
     b[n] = 0;
     for (char *s = b; *s; s++) {
+#ifdef DIGI_JT4                                  /* (FT8 / PI4 have no submode; the 9700 FT8 window is full) */
         if (s[0] == 's' && s[1] == 'u' && s[2] == 'b' && s[3] == '=') { char c = (char)(s[4] & ~0x20); if (c >= 'A' && c <= 'G') cfg_sub = c - 'A'; }
+#endif
         int lo = s[0] == 'f' && s[1] == 'l' && s[2] == 'o' && s[3] == '=';
         int hi = s[0] == 'f' && s[1] == 'h' && s[2] == 'i' && s[3] == '=';
         if (lo || hi) {
@@ -157,8 +174,33 @@ static void read_cfg(void)
         else if (kmatch(s, "loc"))  ktok(s, cfg_loc, sizeof cfg_loc);
         else if (kmatch(s, "txfreq")) { int v = kint(s); if (v >= 100 && v <= 3800) cfg_txfreq = v; }
         else if (kmatch(s, "cwshift")) { int v = kint(s); if (v >= 0 && v <= 1000) cfg_cwshift = v; }
+#ifdef DIGI_JT4
+        else if (!pass && kmatch(s, "gen")) mc_gen = kint(s);
+#endif
     }
+  }
 }
+#ifdef DIGI_JT4
+/* the owner changed a DECODE SET value (the submode): @MODECFG's gen= differs from the one read_cfg saw.  Looked at
+ * once a second at most; an older loader (no @MODECFG) never reports a change. */
+static uint32_t mc_t;
+static int cfg_changed(void)
+{
+    char b[96]; uint32_t now = icap_ticks();
+    if (now - mc_t < 1000u) return 0;
+    mc_t = now;
+    int fd = icap_open("@MODECFG", ICAP_O_READ), n;
+    if (fd < 0) return 0;
+    n = icap_read(fd, b, sizeof b - 1); icap_close(fd);
+    if (n <= 0) return 0;
+    b[n] = 0;
+    for (char *s = b + 1; *s; s++) if (s[-1] == ' ' && kmatch(s, "gen")) return kint(s) != mc_gen;
+    return 0;
+}
+#define SET_CHANGED() cfg_changed()
+#else
+#define SET_CHANGED() 0                          /* FT8 / PI4: no submode; flo / fhi are read at start */
+#endif
 
 /* ---- log (no append mode in the API: keep the newest ~2 KB in RAM, loaded at start, and rewrite) */
 static char hist[HIST_SZ]; static uint32_t hl;
@@ -368,7 +410,12 @@ static int16_t rbuf[512];
 #ifdef DIGI_RDBUF
 /* IC-9700 (slow SD cards): the capture is read in DIGI_RDBUF-sample calls through a forward cache instead of
  * 512-sample calls (the per-call cost dominates on such a card); the same samples reach the decoder. */
-static int16_t rcache[DIGI_RDBUF];
+#ifdef DIGI_FT8                                  /* P3a: the 9700 FT8 window was full to 8 B - the @MODECFG read takes */
+#define RDBUF_N (DIGI_RDBUF - 32)                /* 56 B, the cache gives 64 B back (4032 B calls instead of 4096)   */
+#else
+#define RDBUF_N DIGI_RDBUF
+#endif
+static int16_t rcache[RDBUF_N];
 static uint32_t rclen;                           /* the cache holds file samples [rd.pos - rclen, rd.pos) */
 static int src_read(void *ctx, uint32_t start, float *out, uint32_t n)
 {
@@ -384,7 +431,7 @@ static int src_read(void *ctx, uint32_t start, float *out, uint32_t n)
     while (got_n < n) {
         uint32_t idx = start + got_n;
         if (idx >= rd.pos) {                     /* next chunk (also skips forward) */
-            int r = icap_read(rd.fd, rcache, DIGI_RDBUF * 2);
+            int r = icap_read(rd.fd, rcache, RDBUF_N * 2);
             if (r < 2) return got_n ? (int)got_n : -1;
             rclen = (uint32_t)r / 2; rd.pos += rclen;
             pump();                              /* keep capturing the next minute while decoding */
@@ -434,6 +481,17 @@ static int src_read(void *ctx, uint32_t start, float *out, uint32_t n)
 #endif
 static uint32_t last_yield;
 static int timed_out;
+#if !defined(DIGI_NO_BEACON) && !defined(DIGI_PI4)
+#ifdef QSO_THUMB                                         /* the 9700 builds: the window is nearly full */
+#define QSO_FN static __attribute__((noinline, optimize("Os"), target("thumb")))
+#else
+#define QSO_FN static __attribute__((noinline, optimize("Os")))
+#endif
+QSO_FN int qso_poll(void);                               /* qso.h (included after the beacon glue) */
+#define DEC_QSO() qso_poll()
+#else
+#define DEC_QSO() 0
+#endif
 static int dec_abort(void)
 {
     pump();
@@ -441,6 +499,7 @@ static int dec_abort(void)
     if (stop()) return 1;
     if (decoding >= 0 && done[decoding ^ 1].ready) { timed_out = 1; return 1; }   /* next minute complete */
     if (WANT_BEACON(1000)) return 1;             /* the owner armed the beacon: cut the decode short, switch */
+    if (DEC_QSO()) return 1;                     /* P4b: our QSO transmission is due (taps are served from here too) */
     return 0;
 }
 
@@ -471,6 +530,7 @@ static jt4_tx_t *g_tx;
 static int bcn_fill(void *c, int16_t *b, int n) { (void)c; return jt4_tx_fill(g_tx, b, n); }
 static int bcn_prepare(const char *call, const char *loc, bcn_fill_t *f, void **c, const char **err)
 {
+    if (cfg_changed()) read_cfg();                                     /* P3a: SUBMODE changed while beaconing */
     char msg[24]; int e = jt4_beacon_text(call, loc, msg);             /* owner decision: CALL LOC4 (free text) */
     if (!e) e = jt4_tx_init(g_tx, msg, cfg_txfreq ? (double)cfg_txfreq : 1500.0, cfg_sub, 0, 0);
     if (e) { *err = e == TXE_LEN ? "call too long for JT4" : e == TXE_MSG ? "use call= in CFG" : "encode error"; return -1; }
@@ -491,6 +551,39 @@ static int bcn_prepare(const char *call, const char *loc, bcn_fill_t *f, void **
 static int16_t txbuf[160];
 #endif /* !DIGI_NO_BEACON */
 
+/* ================================================================= QSO mode (P4b, qso.h) =====
+ * FT8 and JT4 only (PI4 is a beacon mode).  The operator taps a decoded line, then the "TX?" prompt; the loader grants
+ * and times the transmission.  The encoder state sits in the decoder's work arena (no decode runs while we send; the
+ * FT8 callsign hash table in front of it is not touched). */
+#if !defined(DIGI_NO_BEACON) && !defined(DIGI_PI4)
+#define DIGI_QSO 1
+#define QSO_SEC   PERIOD
+#define QSO_CALL  cfg_call
+#define QSO_LOC   cfg_loc
+#define QSO_TXF   cfg_txfreq
+static void *qso_arena;
+static void qso_capdrop(void)                                    /* after the transmission (P5) */
+{
+    if (cap.fd < 0) return;
+    if (cap.n >= CAP_SAMP / 4u * 3u) { cap_finish(); return; }   /* the period before ours, all but complete: keep it */
+    icap_close(cap.fd); cap.fd = -1;                             /* the period we transmit in */
+}
+#ifdef DIGI_FT8
+#define QSO_FINAL "RR73"
+static int qso_enc(const char *msg, int tone) { g_tx = (ft8_tx_t *)qso_arena; return ft8_tx_init(g_tx, msg, (double)tone, 0); }
+static char *qso_modetag(char *d) { return bcn_cpy(d, "<MODE:3>FT8 "); }
+#else
+#define QSO_FINAL "RRR"
+static int qso_enc(const char *msg, int tone) { g_tx = (jt4_tx_t *)qso_arena; return jt4_tx_init(g_tx, msg, (double)tone, cfg_sub | JT4_STD, 0, 0); }
+static char *qso_modetag(char *d) { d = bcn_cpy(d, "<MODE:3>JT4 <SUBMODE:4>JT4"); *d++ = (char)('A' + cfg_sub); *d++ = ' '; *d = 0; return d; }
+#endif
+static int qso_stream(void) { return bcn_stream(bcn_fill, 0, txbuf, (int)(sizeof txbuf / sizeof txbuf[0])); }
+#include "qso.h"
+#define QSO_POLL() qso_poll()
+#else
+#define QSO_POLL() 0
+#endif
+
 /* fresh capture / decode state: at start and when the app comes back from (or goes to) beacon mode.  A capture in
  * progress is dropped (its minute is lost anyway while the radio transmits). */
 static void dec_reset(void)
@@ -507,8 +600,6 @@ static void dec_reset(void)
 int app_main(const struct icap_svc *svc)
 {
     icap_use(svc);
-    read_cfg();
-    if (cfg_flo >= cfg_fhi) { cfg_flo = 200.0f; cfg_fhi = 3000.0f; }
     char line[100], *q;
     void *work = icap_heap(); uint32_t wlen = icap_heap_size();
 #ifdef DIGI_FT8
@@ -521,6 +612,8 @@ int app_main(const struct icap_svc *svc)
     int ok = icap_audio_rate() == (int)FS && work && wlen >= 64 * 1024, loaded = 0, clock_warned = 0;
 
     for (;;) {
+        read_cfg();                                  /* at start, and again after a DECODE SET change (JT4 submode) */
+        if (cfg_flo >= cfg_fhi) { cfg_flo = 200.0f; cfg_fhi = 3000.0f; }
 #ifndef DIGI_NO_BEACON
         if (WANT_BEACON(0)) {                        /* armed: transmit every period until the owner disarms */
             dec_reset();
@@ -540,7 +633,7 @@ int app_main(const struct icap_svc *svc)
 #endif
         if (!ok) {
             icap_set_line(2, MODE_NAME ": needs 8 kHz audio + app region (firmware too old)");
-            while (!stop() && !WANT_BEACON(1000)) icap_sleep_ms(200);
+            while (!stop() && !WANT_BEACON(1000) && !SET_CHANGED()) icap_sleep_ms(200);
             if (stop()) return 1;
             continue;
         }
@@ -551,7 +644,12 @@ int app_main(const struct icap_svc *svc)
 
     while (!stop()) {
         if (WANT_BEACON(1000)) break;                /* the owner armed the beacon: leave decoding */
+        if (SET_CHANGED()) break;                    /* P3a: new submode -> re-read, fresh capture / decode state */
         pump();
+#ifdef DIGI_QSO
+        if (qso_poll()) { qso_arena = work; qso_run(); continue; }   /* P4b: the granted transmission, once (P5: no
+                                                              * pump / SD write in front of it; pump() ran just above) */
+#endif
         if (open_err == 1) { note(MODE_NAME ": SD error - cannot create the capture file (card full / locked?)"); open_err = 2; }
         if (lost) { note(MODE_NAME ": a " PERIOD_WORD " was skipped (decoder behind)"); lost = 0; }
         if (cap.clock_bad && !clock_warned) { note(MODE_NAME ": radio clock not set - set the time"); clock_warned = 1; }

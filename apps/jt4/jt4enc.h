@@ -29,6 +29,9 @@
 int jt4_beacon_text(const char *call, const char *loc, char *out);
 /* msg -> 206 tones (0..3).  Returns 0 or TXE_*. */
 int jt4_encode(const char *msg, uint8_t tones[JT4_NSYM]);
+/* P4b: a STANDARD message "<CQ|call> <call> [grid|+NN|-NN|R+NN|R-NN|RRR|73]" (WSJT-X packmsg type 1) */
+int jt4_encode_std(const char *msg, uint8_t tones[JT4_NSYM]);
+#define JT4_STD 0x100                    /* jt4_tx_init: submode | JT4_STD = msg is a standard message */
 
 typedef struct {
     uint8_t tones[JT4_NSYM];

@@ -6,7 +6,8 @@
 #   sh build.sh pack       pack only (python3)
 # The vendored ft8_lib (ft8/, MIT) is compiled freestanding through ft8/ft8_port.h.
 # IC-705: 16 KiB stack.  IC-9700: 8 KiB stack and -DFT8_ARENA_SCRATCH (the decoder's BP/OSD working arrays
-# live in the decoder arena instead of .bss, so image + bss fit the smaller 9700 app window).
+# live in the decoder arena instead of .bss, so image + bss fit the smaller 9700 app window); the 9700 app shell
+# is compiled for size (-Os) with a 4 KiB decode history (-DDIGI_HIST=4096) to make room for the QSO helper.
 set -e
 T=../../tools; SDK=../..; C=../digi-common
 . $C/flags.sh
@@ -30,7 +31,7 @@ if [ "$STEP" = all ] || [ "$STEP" = compile ]; then
   $GCC $CF $LF $B/icap_start.o $B/705/digi_ft8.o $B/705/ft8dec.o $B/digi_util.o $B/f_port.o $FO $ENC -lgcc -o $B/705/ft8.elf
   # IC-9700
   $GCC $DF -I. -Ift8 -DFT8_ARENA_SCRATCH -c ft8dec.c -o $B/9700/ft8dec.o
-  $GCC $DF -I. -Ift8 -DDIGI_FT8 $SD9700 -c $C/digiapp.c -o $B/9700/digi_ft8.o
+  $GCC $DF -Os -I. -Ift8 -DDIGI_FT8 -DDIGI_HIST=4096 $SD9700 -c $C/digiapp.c -o $B/9700/digi_ft8.o
   $GCC $CF $LF $B/icap_start.o $B/9700/digi_ft8.o $B/9700/ft8dec.o $B/digi_util.o $B/f_port.o $FO $ENC -lgcc -o $B/9700/ft8.elf
 fi
 if [ "$STEP" = all ] || [ "$STEP" = pack ]; then

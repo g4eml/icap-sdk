@@ -20,7 +20,7 @@ if [ "$STEP" = all ] || [ "$STEP" = compile ]; then
     D=$B/$R; mkdir -p $D
     LF="-nostdlib -T q65_split$R.ld -Wl,--gc-sections -Wl,--no-dynamic-linker -Wl,-Map=$D/q65.map"
     $GCC $CF -c $T/icap_start.S -o $D/icap_start.o
-    $GCC $CF -Os -c q65_705.c -o $D/q65_705.o      # the shim is not the hot path: size first
+    $GCC $CF -Os -mthumb -c q65_705.c -o $D/q65_705.o   # the shim is not the hot path: size first (Thumb)
     $GCC $CF -Oz -c stubs.c -o $D/stubs.o
     for e in txsynth msg77; do $GCC $EF -c $C/$e.c -o $D/$e.o; done
     $GCC $EF -c q65enc.c -o $D/q65enc.o

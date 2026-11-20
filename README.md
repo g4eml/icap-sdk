@@ -8,10 +8,11 @@ touch raw memory or call firmware functions directly.
 The whole API is in [`icap.h`](icap.h). This README explains it.
 
 > **Status: v1rc.** Few users so far, so the API may still change before v1.0.
-> Everything below runs on the current custom firmware releases: IC-705 E **20261119v8** and
-> IC-9700 **20261119v6** with the SD-card runtime **20261119v8** (patcher:
-> https://sq6emm.github.io/icom-custom-firmware/). Build tools and an example are in
-> [`tools/`](tools/) and [`examples/`](examples/).
+> Everything below describes the custom firmware release **20261119v14** for the IC-705 (E / J)
+> and the IC-9700 (patcher: https://sq6emm.github.io/icom-custom-firmware/). The firmware image
+> and the runtime files in the app folder of one release belong together - install them as a set.
+> QSO mode (FT8 / Q65 / JT4) and APRS are both verified on hardware (IC-705 E and IC-9700).
+> Build tools and an example are in [`tools/`](tools/) and [`examples/`](examples/).
 
 ---
 
@@ -134,7 +135,9 @@ DECODE screen for decodes only — WSJT-X style lines such as
 `Q65.CFG`) from its folder with the normal file API, one `key=value` per line.
 The reference decoders use `flo=`/`fhi=` (tone-0 search range, Hz), `sub=` (JT4/Q65
 submode) and `scope=<lo>-<hi>` or `scope=<Hz>` (the DECODE mini-scope span, Hz).
-These are app conventions, not firmware — pick your own keys.
+These are app conventions, not firmware — pick your own keys. The settings the owner makes on the
+radio itself (DECODE › SET) reach the app through `@MODECFG` (below); the reference decoders apply
+their built-in defaults first, then `@MODECFG`, then the `.CFG` file, which wins.
 
 ### Station identity & radio state (read-only virtual files)
 ```c
@@ -145,6 +148,7 @@ icap_open("@MYLOC",  ICAP_O_READ);   /* 6-char Maidenhead locator from the radio
 icap_open("@CLOCK",  ICAP_O_READ);   /* clock lock + time to the next TX slot           */
 icap_open("@FREQ",   ICAP_O_READ);   /* the true on-air frequency (Hz), transverter-aware */
 icap_open("@TX",     ICAP_O_READ);   /* TX / beacon state (see Transmit)                 */
+icap_open("@MODECFG",ICAP_O_READ);   /* the owner's settings for this decoder mode       */
 icap_open("@SPOT",   ICAP_O_WRITE);  /* report a decode to PSKReporter (see Spotting)    */
 ```
 Each read file is one short line ending in `\n`; the `k=v` fields are separated by spaces:
@@ -156,12 +160,35 @@ Each read file is one short line ending in `\n`; the `k=v` fields are separated 
 | `@CLOCK` | `K=… S=… L=1 P=60 O=0 N=…` | `L` 1 = clock locked; `P`/`O` the active TX period / offset (s); `N` ms to the next slot |
 | `@FREQ` | `f=1296174000 usb=1 rx=main trv=0` | true on-air dial in Hz (transverter offset applied), receiver, active transverter slot (0 = none) |
 | `@TX` | `st=0 err=0 n=3 … beacon=1 owner=0 clk=1 gate=0` | `beacon` 1 = the owner armed the beacon; `owner` 1 = the owner stopped TX (no TX until the app restarts); `err` reason of the last abort; `gate` 0 = TX would be allowed now; `n` transmissions so far |
+| `@MODECFG` | `mode=JT4 sub=G pskr=1 flo=200 fhi=3000 gen=7` | the settings the owner chose on the radio for the decoder mode the app was started for (see below) |
 
 Parse fields by name (more may be added); ignore what you do not know.
 These let a beacon or a spotting app read who/where the station is and what it is on,
 without the app storing any of it. A name starting with `@` is reserved: firmware
 without this feature rejects it with `ICAP_E_NAME`, so probe once and fall back to
 your own config keys (e.g. `call=`, `loc=`) if it is absent.
+
+**`@MODECFG` - the per-mode settings from the radio** (release 20261119v13). On the DECODE screen
+the owner sets each decoder mode under **SET** (SUBMODE, PSKREPORT); the radio keeps these values
+and hands them to the app as one line, the fields in this order, separated by single blanks:
+
+```
+mode=<NAME> sub=<A..|-> pskr=<0|1> [flo=<Hz> fhi=<Hz>] [scope=<lo>-<hi>] gen=<n>
+```
+
+| Field | Meaning |
+|---|---|
+| `mode` | name of the decoder mode (up to 4 characters) |
+| `sub` | submode letter (JT4 `A`..`G`, Q65 `A`..`E`), `-` for a mode without submodes |
+| `pskr` | 1 = PSKReporter spotting on, 0 = off (the firmware itself drops `@SPOT` lines while it is 0) |
+| `flo`, `fhi` | tone search range in Hz - present only when set |
+| `scope` | span of the DECODE mini-scope in Hz - present only when set |
+| `gen` | a counter that changes whenever any value of the line changes |
+
+The file is read-only. Read it at start and about once a second while idle, and compare `gen` (or
+the whole line) to follow a change the owner makes while the app runs. `ICAP_E_NAME` means there is
+nothing to read - older firmware, the runtime files of the release not installed, or an app that
+was not started as a decoder mode: keep your defaults and your own `.CFG` keys.
 
 ### Transmit (gated)
 ```c
@@ -191,6 +218,86 @@ error (`ICAP_E_PERM` not armed, stopped by the owner or the session TX limit use
 `icap_tx_end()`. If the owner keys the radio, presses STOP/EXIT or changes band/mode, the write
 fails and `@TX` reports `owner=1`.
 
+### QSO mode (owner-driven) - `@QSO`, `@QTX0` / `@QTX1`, `@QTXC`, `@QLOG`
+*New in release 20261119v13, verified on hardware (IC-705 E and IC-9700) in 20261119v14.*
+
+In a decoder mode the owner can work a QSO from the DECODE screen. **An app never sends a QSO
+message on its own:** every transmission needs a tap by the owner, and the firmware - not the
+app - decides whether a tap counts. The reference apps (FT8, JT4, Q65) do this through
+[`apps/digi-common/qso.h`](apps/digi-common/qso.h): a tap on a decoded line makes the app print the
+next message of the standard sequence as a prompt (`TX? SP6ABC SQ6EMM JO81`); a tap on that `TX?`
+line sends it once, in the period opposite to the tapped station's. CQ calling is armed on the
+radio (hold the mode tile twice as long as for the beacon: red frame, then green). A green frame
+on the emission button means CQ is armed or a QSO transmission is armed / on the air; the red
+frame stays the beacon.
+
+Four more virtual files carry this. All are opened with `ICAP_O_READ` and answer with one short
+line; opening `@QTX*` or `@QLOG` *is* the request. Firmware without QSO mode returns `ICAP_E_NAME`.
+
+| File | Answer | What it does |
+|---|---|---|
+| `@QSO` | `n=<taps> cq=<0\|1> q=<0\|1> t=<text>` | Nothing - it is the state to poll (the reference apps: every 300 ms). `n` counts the owner's taps on a text row of the DECODE screen (wraps at 65536); `t` is the tapped row as drawn (up to 63 characters, trailing blanks cut; it is the last field and contains blanks); `cq` 1 = the owner armed CQ; `q` 1 = a QSO / CQ transmission is armed or on the air. |
+| `@QTX0`, `@QTX1` | `r=<ms>` or `r=-<code>` | Asks for **one** transmission in the even (`0`) or odd (`1`) period of the mode (FT8: :00 / :30 = even, :15 / :45 = odd; 60 s modes: the parity of the minute). `r >= 0`: armed, the first sample of the period is due in `r` ms. `r=-5` (`ICAP_E_PERM`): no valid tap (see the rules), a beacon is armed, the app is not a QSO-capable decoder mode, or the owner aborted and has not tapped since. `r=-8` (`ICAP_E_BUSY`): the TX gate refuses - clock not locked, not USB-D, modulation source, transmitter busy, ... |
+| `@QTXC` | as `@QTX0` | The same for the CQ period; granted only while the owner has CQ armed (`r=-5` otherwise). The first grant takes the next period, later ones keep its parity. |
+| `@QLOG <record>` | `r=0` or `r=-<code>` | Appends `<record>` + CR LF to the ADIF log `ICAPQSO.ADI` in the app folder (a new or empty file gets an ADIF header first). The record is the text after the blank, 1..240 characters, e.g. `<CALL:6>SP6ABC <MODE:3>FT8 ... <EOR>`. `r=-8` while a transmission is armed, `r=-3` on a file error - the file is then untouched and the request can be repeated. |
+
+After a grant, do **not** call `icap_tx_begin()`: write the audio with `icap_tx_write()` starting
+about 1 s before the period (the write blocks until the period starts; the firmware keys the radio
+itself and gives up if the first sample is not there 300 ms after the period start), then call
+`icap_tx_end()`. To cancel an armed transmission, call `icap_tx_end()` without writing.
+
+```c
+char b[104]; int fd, n;
+fd = icap_open("@QSO", ICAP_O_READ);              /* poll: did the owner tap a row? */
+if (fd >= 0) { n = icap_read(fd, b, sizeof b - 1); icap_close(fd); /* parse n=, cq=, t= */ }
+...
+fd = icap_open("@QTX1", ICAP_O_READ);             /* after the owner confirmed: one TX, odd period */
+if (fd >= 0) { n = icap_read(fd, b, sizeof b - 1); icap_close(fd); /* "r=<ms>" or "r=-<code>" */ }
+```
+
+**Rules the firmware enforces** (an app cannot get around them):
+
+- **One tap, at most one answer.** A tap gives the app credit for one granted transmission, and
+  only if no transmission was armed or on the air when it was made. (Such a tap is still reported
+  in `@QSO`, so an app can use it to cancel an armed answer.)
+- **An owner abort latches.** PTT, EXIT or TRANSMIT end the transmission and void the credit;
+  nothing is granted again until the owner taps a row *after* the abort.
+- **A tap is a tap on a text row.** A touch that began elsewhere (a finger dragged from a soft key
+  onto a row) does not count, and nothing is armed while a finger is held on the mode tile.
+- **One period, same gate as the beacon.** A granted transmission is a single period under the
+  full TX gate of [Transmit](#transmit-gated): clock lock, band / mode / PTT / time-out-timer
+  checks, the per-transmission cap, the session TX limit while CQ is armed (without CQ each
+  tap-confirmed answer is its own session).
+- **Beacon and CQ are never armed together**, and taps are not delivered to the app while a beacon
+  is armed.
+- **The log is append-only.** `ICAPQSO.ADI` is opened as it is and written at its end; it is
+  created only when it does not exist and is never truncated. Nothing is written to it while a
+  transmission is armed.
+- Spots are not sent to PSKReporter while a transmission is armed or on the air.
+
+What the reference apps add on their side, and what your app should do too: confirm a `TX?` tap
+only when the prompt has been on the screen for about a second (a prompt that appears under the
+finger is not a decision); drop taps made during a transmission; keep SD-card work out of the path
+between leaving the decoder and the first audio sample; repeat a refused log write (every 5 s, 6
+times) and tell the owner if the QSO could not be logged.
+
+### APRS - a firmware feature (release 20261119v14)
+*Verified on hardware (IC-705 E and IC-9700).* APRS is built into the firmware, not a reference app
+in this SDK: **MENU › SET › GPS › GPS TX Mode** gains a fourth choice, **APRS** (next to OFF /
+D-PRS / NMEA). With it the loader starts and stops the bundled `APRS.APP` by itself - the owner
+does not open it from the app list. `APRS.APP` sends a 1200 Bd AFSK (Bell 202) position beacon on
+the current frequency (FM only), using the same gated TX path as the beacon above
+(`icap_tx_begin` / `icap_tx_write` / `icap_tx_end`), and feeds received stations into the radio's
+own RX History; frames are also written to `Apps\APRS.LOG`. The station identity comes from the
+radio (`@MYCALL` and the GPS/manual position); nothing is configured in the app.
+
+The interface it uses is already in this SDK - gated TX, `@MYCALL` / `@MYLOC` / `@FREQ`, the app
+folder - so you can write your own packet app the same way. Two notes from the on-air app:
+**receive needs NR (Noise Reduction) off** on that receiver, because NR distorts the AFSK tones and
+nothing is decoded; and on the IC-9700 the decoder runs on **MAIN** only. On the IC-705 the
+received stations ride the D-STAR receive path, so the firmware injects them only when that path is
+free (never while the receiver is in DV or its header is busy).
+
 ### Spotting (PSKReporter) - `@SPOT`
 A decoder reports each decode by writing **one line** to the write-only virtual file `@SPOT`:
 ```c
@@ -201,7 +308,8 @@ icap_close(fd);
 The firmware does the rest: it adds the true on-air frequency (dial from `@FREQ` + the tone),
 the UTC time and the station identity, queues the spots and sends them to PSKReporter
 (IPFIX over UDP, `report.pskreporter.info:4739`) - only when `@MYCALL` and `@MYLOC` are set and
-the radio has network. Reports are batched: at the first write after 5 minutes, or at once when
+the radio has network, and while the owner has PSKREPORT on for the mode (`pskr=` in `@MODECFG`).
+Reports are batched: at the first write after 5 minutes, or at once when
 8 different stations are queued. Use the ADIF mode name (`FT8`, `Q65`, `JT4`, ...) and the
 sender's call exactly as decoded (`-` when the message carries no grid). The write itself may take
 a moment when a batch is sent; failures are retried later and never reported to the app.
@@ -272,21 +380,29 @@ per radio, because the app window, stack and data-region sizes differ.
 Apps are pluggable **decoders** and **beacon transmitters** inside the radio's native UI.
 
 - **RX decode** *(implemented, IC-705 E and IC-9700)*: `icap_audio_read()` → your decoder →
-  `icap_decode_out()` on the native DECODE screen. Reference decoders: Q65-60, FT8, JT4, PI4 —
-  see [`apps/`](apps/).
+  `icap_decode_out()` on the native DECODE screen. Reference decoders: Q65-60, FT8, JT4, PI4,
+  WSPR-2 — see [`apps/`](apps/).
 - **Decoder picker** *(implemented)*: the RTTY button cycles through the registered decoder modes.
 - **TX beacons** *(implemented, confirmed on both radios)*: armed by the owner with a long press,
   red frame on the emission button, period-aligned, station identity from `@MYCALL` / `@MYLOC`.
-  FT8, Q65, JT4 and PI4 transmit from inside their decoder apps; WSPR-2 is a beacon-only app.
+  FT8, Q65, JT4, PI4 and WSPR-2 transmit from inside their decoder apps.
+- **Per-mode settings** *(implemented)*: DECODE › SET (SUBMODE, PSKREPORT) → `@MODECFG`.
+- **QSO mode** *(implemented in release 20261119v13 for FT8, Q65 and JT4; verified on hardware in
+  20261119v14)*: tap a decode, confirm the `TX?` prompt, one transmission per tap; CQ; ADIF log
+  `ICAPQSO.ADI`. See [QSO mode](#qso-mode-owner-driven---qso-qtx0--qtx1-qtxc-qlog).
 - **Spotting** *(implemented, confirmed on both radios)*: `@SPOT` → PSKReporter, transverter-aware.
+- **APRS** *(implemented in release 20261119v14, confirmed on IC-705 E and IC-9700)*: a fourth GPS
+  TX Mode; the firmware runs the bundled `APRS.APP` (1200 Bd AFSK beacon + RX into RX History).
+  See [APRS](#aprs---a-firmware-feature-release-20261119v14).
 - **Autostart** *(implemented)*: `AUTORUN.CFG`.
-- **Next:** a WSPR decoder; tighter duplicate suppression for spotting.
+- **Next:** tighter duplicate suppression for spotting.
 - **Performance:** very limited resources — fixed-point DSP, streaming (no full PCM buffers),
   minimal allocation, NEON where available.
 
-On the IC-9700 the loader runtime is a file on the SD card that the firmware loads at start-up, so
-it can be updated without reflashing; always copy the runtime files together with the apps bundle
-of the same release.
+Parts of the loader runtime are files in the app folder on the SD card that the firmware loads at
+start-up; they must come from the same release as the firmware image (a set that does not match is
+refused, and the features it carries - among them `@MODECFG`, spotting and QSO mode - are then
+absent). Always copy the runtime files and the apps bundle of one release together.
 
 ---
 

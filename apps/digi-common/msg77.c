@@ -74,6 +74,26 @@ static int grid4(const char *g, uint32_t *ig)
     return 0;
 }
 
+/* P4b (QSO mode): the third word of a standard message - grid, report "+NN" / "-NN", "R+NN" / "R-NN" (*ir = 1), "RRR",
+ * "RR73", "73" - as pack77_1 packs it: igrid4 = MAXGRID4 + irpt, irpt 2 / 4 for RRR / 73, else report + 35 (reports
+ * -50..-31 are sent as +51..+70); "RR73" goes out as the grid RR73 (32373), which is what WSJT-X transmits.  Report range -50..+49. */
+static int grid_rpt(const char *g, uint32_t *ig, uint32_t *ir)
+{
+    int i = 0, v;
+    *ir = 0;
+    if (seq(g, "RRR")) { *ig = MAXGRID4 + 2; return 0; }
+    if (seq(g, "73")) { *ig = MAXGRID4 + 4; return 0; }
+    if (g[0] == 'R' && (g[1] == '+' || g[1] == '-')) { *ir = 1; i = 1; }
+    if (g[i] != '+' && g[i] != '-') return grid4(g, ig);
+    if (!is_d(g[i + 1]) || !is_d(g[i + 2]) || g[i + 3]) return TXE_GRID;
+    v = (g[i + 1] - '0') * 10 + (g[i + 2] - '0');
+    if (g[i] == '-') v = -v;
+    if (v < -50 || v > 49) return TXE_GRID;
+    if (v <= -31) v += 101;
+    *ig = (uint32_t)((int)MAXGRID4 + 35 + v);
+    return 0;
+}
+
 static void put(uint8_t *o, int *pos, uint32_t v, int nb)
 {
     while (nb-- > 0) {
@@ -86,7 +106,7 @@ int msg77_pack(const char *msg, uint8_t out[10])
 {
     char w[3][14];
     int nw = 0, len = 0, i, rc, pos = 0;
-    uint32_t n28a, n28b, ig = MAXGRID4 + 1, i3 = 1, ipa = 0, ipb = 0;
+    uint32_t n28a, n28b, ig = MAXGRID4 + 1, i3 = 1, ipa = 0, ipb = 0, ir = 0;
     char sa = 0, sb = 0;
     if (!msg || !out) return TXE_ARG;
     for (i = 0; ; i++) {                       /* upper case, split on blanks */
@@ -97,7 +117,7 @@ int msg77_pack(const char *msg, uint8_t out[10])
             continue;
         }
         if (nw >= 3 || len >= 13) return TXE_MSG;
-        if (!is_d(c) && !is_l(c) && c != '/') return TXE_CHAR;
+        if (!is_d(c) && !is_l(c) && c != '/' && c != '+' && c != '-') return TXE_CHAR;
         w[nw][len++] = c;
     }
     if (nw < 2) return TXE_MSG;
@@ -107,7 +127,7 @@ int msg77_pack(const char *msg, uint8_t out[10])
     else if ((rc = pack_call(w[0], &n28a, &sa)) != 0) return rc;
     if ((rc = pack_call(w[1], &n28b, &sb)) != 0) return rc;
     if (nw == 2 && sb) return TXE_MSG;         /* WSJT-X: 2 words with "/" in call 2 is not type 1 */
-    if (nw == 3 && (rc = grid4(w[2], &ig)) != 0) return rc;
+    if (nw == 3 && (rc = grid_rpt(w[2], &ig, &ir)) != 0) return rc;
     if ((sa == 'P' && sb == 'R') || (sa == 'R' && sb == 'P')) return TXE_CALL;
     if (sa == 'P' || sb == 'P') i3 = 2;
     ipa = sa != 0;
@@ -115,7 +135,7 @@ int msg77_pack(const char *msg, uint8_t out[10])
     for (i = 0; i < 10; i++) out[i] = 0;
     put(out, &pos, n28a, 28); put(out, &pos, ipa, 1);
     put(out, &pos, n28b, 28); put(out, &pos, ipb, 1);
-    put(out, &pos, 0, 1);      /* ir */
+    put(out, &pos, ir, 1);
     put(out, &pos, ig, 15);
     put(out, &pos, i3, 3);
     return 0;

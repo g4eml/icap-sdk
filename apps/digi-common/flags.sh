@@ -5,7 +5,8 @@ CF="-mcpu=cortex-a9 -marm -mfpu=neon-vfpv3 -mfloat-abi=hard -O2 -ffreestanding -
 LF="-nostdlib -T $T/app.ld -Wl,--emit-relocs -Wl,--no-dynamic-linker"
 DF="$CF -fbuiltin -fno-math-errno -I$C"      # decoders and the app shell
 EF="$DF -ffp-contract=off"                   # beacon encoders: bit-exact floating point (no FMA contraction)
-# IC-9700 builds: captures go to (possibly slow) SD cards in small writes, the decoder reads through a small cache
-SD9700="-DDIGI_CAPBUF=4096 -DDIGI_RDBUF=2048"
+# IC-9700 builds: captures go to (possibly slow) SD cards in small writes, the decoder reads through a small cache;
+# -DQSO_THUMB compiles the QSO helper (qso.h) as Thumb code (the 9700 app window is smaller)
+SD9700="-DDIGI_CAPBUF=4096 -DDIGI_RDBUF=2048 -DQSO_THUMB"
 GCC=${GCC:-arm-none-eabi-gcc}
 PY=${PYTHON:-python3}

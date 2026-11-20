@@ -15,7 +15,9 @@
  * Files open at once: capture write + PCM read + spectra tmp + one transient log write = 4 (loader v11).
  * Logs: Q65DBG.TXT (debug; buffered while a capture is open, flushed between captures or at most every
  * 10 s through the 4th file slot), Q65DEC.TXT (decode log).  Q65.CFG optional: "fmin fmax [capture_s]"
- * (Hz, Hz <= 1200 Hz span, 52..57 s).
+ * (Hz, Hz <= 1200 Hz span, 52..57 s).  The radio's own setting of this mode (loader virtual file "@MODECFG", DECODE
+ * screen > SET > SUBMODE, "mode=Q65 sub=D ...") gives the Q65-60 submode A..E of the beacon TX; the decoder linked
+ * here is Q65-60D only.
  *
  * Memory: segment 1 (.text/.data/.bss) in the 80 KiB app window, segment 2 (.rodata) at the base of
  * the 240 KiB app data region; the rest of the region is one PCM read chunk + the decoder heap (the decoder
@@ -172,11 +174,22 @@ static void read_cfg_beacon(void)
  * Decode and beacon never run at once, so the encoder state sits in the PCM read chunk at the region start (idle
  * while not decoding) and the Q65 decoder heap behind it is never touched - the decoder keeps its FULL heap. */
 static q65_tx_t *g_tx;
+/* P3a: the SUBMODE the owner chose on the radio - "sub=<A..E>" of the loader's "@MODECFG" line, read for every
+ * transmission (an older loader has no such file: the default, D).  Thumb, and nothing else of that line is used: the
+ * 9700 build of this app has ~130 B of its window left. */
+__attribute__((noinline, optimize("Os"), target("thumb"))) static int mc_sub(void)
+{
+    char b[24];
+    if (bcn_vfline("@MODECFG", b, (int)sizeof b))
+        for (const char *s = b; s[1]; s++)
+            if (s[0] == 'b' && s[1] == '=' && (unsigned)(s[2] - 'A') <= 4u) return s[2] - 'A';     /* su[b=]X */
+    return Q65_SUBMODE_DEFAULT;
+}
 static int bcn_fill(void *c, int16_t *b, int n) { (void)c; return q65_tx_fill(g_tx, b, n); }
 static int bcn_prepare(const char *call, const char *loc, bcn_fill_t *f, void **c, const char **err)
 {
     char msg[28]; int e = msg77_beacon_text("DE", call, loc, msg);
-    if (!e) e = q65_tx_init(g_tx, msg, cfg_txfreq ? (double)cfg_txfreq : 1500.0, 60, Q65_SUBMODE_DEFAULT, 0, 0);
+    if (!e) e = q65_tx_init(g_tx, msg, cfg_txfreq ? (double)cfg_txfreq : 1500.0, 60, mc_sub(), 0, 0);
     if (e) { *err = e == TXE_CALL ? "call needs call= in CFG" : e == TXE_GRID ? "bad grid" : "encode error"; return -1; }
     *f = bcn_fill; *c = 0; return 0;
 }
@@ -499,6 +512,9 @@ static void free_dec_fds(void)
 /* cooperative abort: STOP, or the next capture is complete (its decode takes over).  Pumps audio and
  * yields (~every 20 ms) so the firmware stays responsive. */
 static u32 g_last_yield, g_abort_polls, g_last_poll, g_poll_gap;
+/* P4b: QSO mode (qso.h, included below).  Thumb: the 9700 window is nearly full, and none of it is hot. */
+#define QSO_FN static __attribute__((noinline, optimize("Os"), target("thumb")))
+QSO_FN int qso_poll(void);
 static int cb_should_abort(void *ctx)
 {
     (void)ctx;
@@ -507,7 +523,7 @@ static int cb_should_abort(void *ctx)
     pump(0);
     u32 now = icap_ticks();
     if (now - g_last_yield >= 20u) { g_last_yield = now; icap_yield(); }
-    return stop() || g_abort_next || g_io_err;
+    return stop() || g_abort_next || g_io_err || qso_poll();   /* P4b: our QSO transmission is due */
 }
 static void cb_log(void *ctx, const char *s, size_t len)
 {
@@ -594,6 +610,34 @@ static void cap_idle(void)
     g_ready = -1; g_defer = 0; g_wait_t = 0; g_prev_sec = -1;
 }
 
+/* ---- QSO mode (P4b): the operator taps a decoded line, then the "TX?" prompt (qso.h).  The encoder state and the
+ * write buffer use the idle PCM read chunk, exactly as the beacon does; a decode never runs while we send. */
+#define QSO_SEC   60
+#define QSO_FINAL "RR73"
+#define QSO_CALL  cfg_call
+#define QSO_LOC   cfg_loc
+#define QSO_TXF   cfg_txfreq
+static u32 g_hb;                                        /* base of the app data region */
+static void qso_capdrop(void)                           /* after the transmission (P5: no SD work in front of it): as
+                                                         * cap_idle, but a capture waiting for its decode is kept */
+{
+    free_dec_fds();
+    if (g_cap_on) cap_finish(0);
+    g_defer = 0; g_wait_t = 0; g_prev_sec = -1;
+}
+/* P5: QSO answers and CQ are always Q65-60D - the decoder of this app is 60D only, so the other station must be on D
+ * and so must we (the menu SUBMODE stays the beacon's).  One note per run when the menu says something else. */
+static int qso_enc(const char *msg, int tone)
+{
+    static u8 told;
+    g_tx = (q65_tx_t *)(uintptr_t)g_hb;
+    if (!told && mc_sub() != 3) { told = 1; icap_decode_out("QSO: sent as Q65-60D (menu SUBMODE = beacon only)"); }
+    return q65_tx_init(g_tx, msg, (double)tone, 60, 3, 0, 0);
+}
+static int qso_stream(void) { return bcn_stream(bcn_fill, 0, (int16_t *)(uintptr_t)(g_hb + 1024u), 160); }
+static char *qso_modetag(char *d) { return bcn_cpy(d, "<MODE:4>MFSK <SUBMODE:3>Q65 "); }
+#include "qso.h"
+
 int app_main(const struct icap_svc *svc)
 {
     icap_use(svc);
@@ -610,6 +654,7 @@ int app_main(const struct icap_svc *svc)
 
     /* region: [PCM read chunk (s16)][decoder heap] */
     u32 hb = (u32)(uintptr_t)icap_heap(), hs = icap_heap_size();
+    g_hb = hb;
     g_pcm.cap = PCM_CAP;
     u32 cache_b = (g_pcm.cap * 2u + 7u) & ~7u;
     g_pcm.cache = (s16 *)(uintptr_t)hb;
@@ -648,6 +693,7 @@ int app_main(const struct icap_svc *svc)
         while (!stop()) {
             if (bcn_want_poll(cfg_beacon, 1000)) break; /* the owner armed the beacon (checked between decodes) */
             pump(1);
+            if (qso_poll()) { qso_run(); continue; }    /* P4b: the granted QSO / CQ transmission, once */
             if (g_ready >= 0) { decode_one(); continue; }
             icap_sleep_ms(20);
         }
