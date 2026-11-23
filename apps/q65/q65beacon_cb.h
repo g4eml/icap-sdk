@@ -38,7 +38,7 @@ void q65b_heap_init(void *base, size_t size);
 
 /* Decode one captured T/R period.  period_s: 15, 30 or 60; submode: 0..4 = A..E
  * (at 8 kHz all but 15D/15E; an unsupported pair returns 1, logged "Q65B ABORT where=params").
- * candidates/ncand: flattened ncand*63 i32 template codewords, or NULL/0 for blind BP.
+ * candidates/ncand: must be NULL/0 (blind BP; this radio build has no template mode, else -1).
  * sample_rate: Hz (0->12000).  returns 0 = decoded, 1 = no decode, <0 = bad argument. */
 int32_t q65b_decode_cb(const q65b_cb_t *cb,
                        uint32_t period_s, uint32_t submode,

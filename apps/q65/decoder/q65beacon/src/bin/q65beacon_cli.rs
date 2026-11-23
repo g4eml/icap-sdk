@@ -114,6 +114,15 @@ fn arg(args: &[String], key: &str) -> Option<String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Q65_FTZ=1: flush denormals to zero (x86 MXCSR FTZ+DAZ), as NEON always does on the radio
+    #[cfg(target_arch = "x86_64")]
+    if std::env::var_os("Q65_FTZ").is_some() {
+        #[allow(deprecated)]
+        unsafe {
+            use std::arch::x86_64::{_mm_getcsr, _mm_setcsr};
+            _mm_setcsr(_mm_getcsr() | 0x8040);
+        }
+    }
     if args.len() < 2 {
         eprintln!("usage: q65beacon_cli <wav> [--period 15|30|60] [--sub A..E] [--nominal-s S] [--fmin HZ] [--fmax HZ] [--mode blind|template] [--call1 C --call2 C --grid G] [--log PATH]");
         std::process::exit(2);
@@ -194,7 +203,15 @@ fn main() {
 
     let t0 = Instant::now();
     let result = if let Some(lp) = logp {
-        let mut log = q65beacon::debuglog::FileLog::create(&lp).unwrap();
+        // each line prefixed "+<ms> " since the decode started, as on the radio
+        struct Timed(q65beacon::debuglog::FileLog, Instant);
+        impl q65beacon::DebugLog for Timed {
+            fn line(&mut self, s: &str) {
+                let ms = self.1.elapsed().as_secs_f64() * 1000.0;
+                self.0.line(&format!("+{ms:.1} {s}"));
+            }
+        }
+        let mut log = Timed(q65beacon::debuglog::FileLog::create(&lp).unwrap(), Instant::now());
         q65beacon::decode(&src, &mut store, &mut log, &params, mode)
     } else {
         q65beacon::decode(&src, &mut store, &mut q65beacon::NullLog, &params, mode)

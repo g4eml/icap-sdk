@@ -877,7 +877,7 @@ pub fn decode<S: SampleSource, T: SpectraStore, L: DebugLog>(
     mode: Mode<'_>,
 ) -> Option<Decoded> {
     let Some(g) = Geom::new(p) else {
-        log.line("Q65B ABORT where=params reason=unsupported_period_or_submode");
+        log.line("Q65B ABORT where=params reason=mode");
         return None;
     };
     {
@@ -898,7 +898,7 @@ pub fn decode<S: SampleSource, T: SpectraStore, L: DebugLog>(
     // The wide window of every data symbol (64 tones + margins) must fit below Nyquist: at 8 kHz this
     // rules out Q65-15D/E (the 65 tones alone span 3.5 / 6.9 kHz).
     if bps > g.nsps / 2 {
-        log.line("Q65B ABORT where=params reason=submode_too_wide_for_sample_rate");
+        log.line("Q65B ABORT where=params reason=mode");   // too wide for the sample rate
         return None;
     }
     let total = src.len();
@@ -932,7 +932,10 @@ pub fn decode<S: SampleSource, T: SpectraStore, L: DebugLog>(
     let arena_len = (low + nb * BLOCK).max(front + sg.nbins + sg.n_starts * sg.nbins);
     let mut arena: Vec<f32> = Vec::new();
     if g.nsps % 8 != 0 || arena.try_reserve_exact(arena_len).is_err() {
-        log.line("Q65B ABORT where=params reason=unsupported_rate_or_no_memory");
+        // the bytes the arena needed: compare with dec_heap of the app's BOOT line
+        let mut msg = String::new();
+        fmt_line(&mut msg, "Q65B ABORT where=arena reason=no_memory", &[("need", Num::U((arena_len * 4) as u64))]);
+        log.line(&msg);
         return None;
     }
     arena.resize(arena_len, 0.0);

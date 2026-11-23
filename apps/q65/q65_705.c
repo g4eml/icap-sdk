@@ -93,7 +93,6 @@ static char g_dec[DEC_CAP]; static u32 g_dec_len;      /* rolling decode log    
 static char g_line[192];
 static char g_ln2[96];
 static s16  g_capbuf[CHUNK];                           /* capture chunk               */
-static s16  g_drain[DRAIN_N];                          /* audio discard buffer        */
 
 /* ---- rolling text logs, rewritten whole on flush (ICAP has no append/seek) */
 #ifdef Q65_HOST_TRACE
@@ -343,13 +342,14 @@ static u32 g_pre_pos, g_pre_n;
 static void preroll_read(void)
 {
     for (int i = 0; i < 64; i++) {
-        int r = icap_audio_read(g_drain, DRAIN_N);
+        /* straight into the ring, up to its end (no separate drain buffer: the IC-9700 window has no room) */
+        u32 room = PRE_N - g_pre_pos; if (room > DRAIN_N) room = DRAIN_N;
+        int r = icap_audio_read(g_capbuf + g_pre_pos, (int)room);
         if (r == ICAP_E_OVERRUN) { g_pre_n = 0; continue; }   /* discontinuity: forget the pre-roll */
         if (r <= 0) break;
-        for (int k = 0; k < r; k++) g_capbuf[(g_pre_pos + (u32)k) % PRE_N] = g_drain[k];
         g_pre_pos = (g_pre_pos + (u32)r) % PRE_N; g_pre_n += (u32)r; if (g_pre_n > PRE_N) g_pre_n = PRE_N;
         g_drained += (u32)r;
-        if (r < (int)DRAIN_N) break;
+        if ((u32)r < room) break;
     }
 }
 /* lag_ms: how long ago :00 was (estimated); that much pre-roll becomes the start of the capture */
@@ -578,10 +578,14 @@ static int cb_should_abort(void *ctx)
     if (now - g_last_yield >= 20u) { g_last_yield = now; icap_yield(); }
     return stop() || g_abort_next || g_io_err || qso_gate();   /* P4b: our QSO transmission is due */
 }
+static u32 g_dec_t0;                                    /* decode start: decoder log lines carry "+<ms> " since then */
 static void cb_log(void *ctx, const char *s, size_t len)
 {
     (void)ctx;
-    roll_add(g_dbg, &g_dbg_len, DBG_CAP, s, (u32)len); g_dbg_dirty = 1;
+    char *p = g_line; *p++ = '+'; p = fmt_u(p, icap_ticks() - g_dec_t0); *p++ = ' ';
+    u32 n = (u32)(p - g_line), k = (u32)len; if (k > sizeof g_line - n) k = sizeof g_line - n;
+    z_move(p, s, k);
+    roll_add(g_dbg, &g_dbg_len, DBG_CAP, g_line, n + k); g_dbg_dirty = 1;
     pump(0);
     maybe_flush();
 }
@@ -600,14 +604,14 @@ static void minute_line(char *p, u32 hh, u32 mm, u32 ss, const q65b_result_t *r)
     *q++ = ' '; *q++ = ':'; *q++ = ' '; *q++ = ' ';
     fmt_s(q, r->text);
 }
-static u32 g_ndec;
+static u32 g_ndec, g_dec_heap;                         /* g_dec_heap: in every DECPOLL line (the BOOT line rolls out) */
 static void show_title(void)                            /* app window line 0: "Q65-30C monitor (IC-705)" */
 {
     char *p = mode_name(g_ln2); p = fmt_s(p, " monitor ("); p = fmt_s(p, icap_is_ic9700() ? "IC-9700)" : "IC-705)");
     icap_set_line(0, g_ln2);
     /* too wide for 8 kHz audio: the decoder refuses it (Q65-30E only below ~320 Hz, so not here either) */
     if ((g_period == 15u && g_sub >= 3) || (g_period == 30u && g_sub == 4)) {
-        p = mode_name(g_ln2); fmt_s(p, " is too wide to decode: set SUBMODE A-C (15 s) / A-D (30 s)");
+        p = mode_name(g_ln2); fmt_s(p, ": too wide for 8 kHz");
         icap_set_line(4, g_ln2);
     }
 }
@@ -629,13 +633,23 @@ static void decode_one(void)
     cb.spec_nrows = cb_spec_nrows; cb.spec_ncols = cb_spec_ncols;
     cb.log_line = cb_log; cb.should_abort = cb_should_abort;
     q65b_result_t r; r.ok = 0; r.text[0] = 0;
-    u32 td = icap_ticks();
+    u32 td = icap_ticks(); g_dec_t0 = td;
+    /* Flush denormals to zero for the decode (FPSCR.FZ), as NEON always does.  With FZ off a strong signal that does
+     * not decode (wrong submode, or none in the period) fills the scalar FP of the decoder with denormals; on the
+     * radio that made a no-decode take > 30 s (Q65-30B, IC-9700).  Results are unchanged; the old FPSCR comes back
+     * afterwards (the beacon encoders want exact IEEE arithmetic). */
+#ifdef __arm__
+    u32 fpscr; __asm__ volatile("vmrs %0, fpscr" : "=r"(fpscr)); __asm__ volatile("vmsr fpscr, %0" : : "r"(fpscr | (1u << 24)));
+#endif
     int rc = q65b_decode_cb(&cb, g_period, (u32)g_sub, 0, FS, g_fmin, g_fmax, 0, 0, &r);
+#ifdef __arm__
+    __asm__ volatile("vmsr fpscr, %0" : : "r"(fpscr));
+#endif
     td = icap_ticks() - td;
     free_dec_fds();
     g_dec_file = -1;
     logkv("Q65B DEC", "rc", rc, "ms", (s32)td, "reopen", (s32)g_pcm_reopen);
-    logkv("Q65B DECPOLL", "polls", (s32)g_abort_polls, "max_gap_ms", (s32)g_poll_gap, 0, 0);
+    logkv("Q65B DECPOLL", "polls", (s32)g_abort_polls, "max_gap_ms", (s32)g_poll_gap, "dec_heap", (s32)g_dec_heap);
     if (rc == 0 && r.ok) {
         g_ndec++;
         minute_line(g_ln2, hh, mm, ss, &r);
@@ -695,7 +709,7 @@ static int qso_enc(const char *msg, int tone)
 {
     static u8 told;
     g_tx = (q65_tx_t *)(uintptr_t)g_hb;
-    if (!told && mc_sub() != 3) { told = 1; icap_decode_out("QSO: sent as Q65-60D (menu SUBMODE = beacon only)"); }
+    if (!told && mc_sub() != 3) { told = 1; icap_decode_out("QSO: sent as Q65-60D"); }
     return q65_tx_init(g_tx, msg, (double)tone, 60, 3, 0, 0);
 }
 static int qso_stream(void) { return bcn_stream(bcn_fill, 0, (int16_t *)(uintptr_t)(g_hb + 1024u), 160); }
@@ -736,6 +750,7 @@ int app_main(const struct icap_svc *svc)
      * v3 by the per-app pskr ctx+datagram; restored here). */
     u32 dec_off = cache_b;
     u32 dec_heap = hs > dec_off ? hs - dec_off : 0;
+    g_dec_heap = dec_heap;
     q65b_heap_init((void *)(uintptr_t)(hb + dec_off), dec_heap);
 
     char mode[8]; if (icap_mode(mode, sizeof mode) <= 0) fmt_s(mode, "-");
@@ -746,7 +761,7 @@ int app_main(const struct icap_svc *svc)
     logkv("Q65B CFG", "period", (s32)g_period, "sub", g_sub, "cfg_sub", cfg_sub);
     logkv("Q65B AUDIO", "rate", rate, "clock", g_have_clock, "abi", (s32)svc->abi_version);
     { char *p = fmt_s(g_line, "Q65B MODE "); fmt_s(p, mode); dbg(g_line); }
-    if (rate != (int)FS) dbg("Q65B WARN audio rate is not 8000 Hz - decoding at 8000 anyway");
+    if (rate != (int)FS) dbg("Q65B WARN audio rate not 8000");
 
     for (;;) {
         if (bcn_want_poll(cfg_beacon, 0)) {             /* armed: integrated beacon, until the owner disarms */
@@ -764,7 +779,8 @@ int app_main(const struct icap_svc *svc)
         icap_clear(); show_title();
         if (!g_have_clock) icap_set_line(4, "no radio clock - free-running from launch");
         if (dec_heap < DEC_HEAP_MIN) icap_set_line(4, "decoder heap too small");
-        icap_audio_read(g_drain, 1);                    /* first read starts the loader's capture */
+        icap_audio_read(g_capbuf, 1);                   /* first read starts the loader's capture (not capturing:
+                                                         * g_capbuf is the pre-roll ring) */
         while (!stop()) {
             if (bcn_want_poll(cfg_beacon, 1000)) break; /* the owner armed the beacon (checked between decodes) */
             pump(1);

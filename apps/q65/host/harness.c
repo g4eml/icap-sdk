@@ -161,7 +161,7 @@ int main(int argc, char **argv)
     }
 
     /* the app data region below 4 GB (the app keeps region addresses in 32-bit integers) */
-    uint32_t hsize = getenv("HEAP") ? (uint32_t)atoi(getenv("HEAP")) : 240u * 1024u - 21856u;   /* IC-705: region - segment 2 */
+    uint32_t hsize = getenv("HEAP") ? (uint32_t)atoi(getenv("HEAP")) : 240u * 1024u - 21712u;   /* IC-705: region - segment 2 */
     void *heap = mmap(0, hsize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
     if (heap == MAP_FAILED) { perror("mmap"); return 1; }
 

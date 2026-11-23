@@ -11,7 +11,6 @@
 //! The matching C declarations are in `shim/q65beacon_cb.h`.
 use core::ffi::{c_char, c_int, c_void};
 
-use alloc::vec::Vec;
 
 use crate::debuglog::DebugLog;
 use crate::source::{SampleSource, SpectraStore};
@@ -119,16 +118,16 @@ fn fill(out: &mut Q65bResult, d: &Decoded) {
 /// Decode one captured T/R period via SD-backed callbacks.
 ///
 /// `period_s`: T/R period, 15 / 30 / 60 s; `submode`: 0..=4 = A..E.
-/// `candidates`/`ncand`: flattened `ncand*63` i32 template codewords, or
-/// NULL/0 for a blind belief-propagation decode (the default).
+/// `candidates`/`ncand`: must be NULL/0 - the radio build decodes blind (belief propagation) only.  The
+/// template mode ([`crate::Mode::Template`], host builds) is left out to keep the IC-9700 app window
+/// within its size; template codewords here return -1.
 /// `sample_rate`: capture rate in Hz (0 -> 12000).
 ///
 /// Returns 0 = decoded, 1 = ran but no decode (also for an unsupported period / submode, logged as
 /// `Q65B ABORT where=params`), <0 = bad argument.
 ///
 /// # Safety
-/// `cb` and `out` must be valid; `candidates` (if non-NULL) must point to
-/// `ncand*63` i32.  `q65b_heap_init` must have run first.
+/// `cb` and `out` must be valid.  `q65b_heap_init` must have run first.
 #[no_mangle]
 pub unsafe extern "C" fn q65b_decode_cb(
     cb: *const Q65Cb,
@@ -146,6 +145,9 @@ pub unsafe extern "C" fn q65b_decode_cb(
     out.ok = 0;
     out.text[0] = 0;
     let Some(cb) = cb.as_ref() else { return -1 };
+    if !candidates.is_null() && ncand > 0 {
+        return -1;
+    }
 
     let src = CbSrc(cb);
     let mut store = CbStore { cb, ncols: 0 };
@@ -161,25 +163,7 @@ pub unsafe extern "C" fn q65b_decode_cb(
         ..Params::default()
     };
 
-    let owned: Vec<[i32; NDATA]> = if !candidates.is_null() && ncand > 0 {
-        let flat = core::slice::from_raw_parts(candidates, ncand as usize * NDATA);
-        flat.chunks_exact(NDATA)
-            .map(|c| {
-                let mut a = [0i32; NDATA];
-                a.copy_from_slice(c);
-                a
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let mode = if owned.is_empty() {
-        Mode::Blind
-    } else {
-        Mode::Template(&owned)
-    };
-
-    match crate::decode(&src, &mut store, &mut log, &params, mode) {
+    match crate::decode(&src, &mut store, &mut log, &params, Mode::Blind) {
         Some(d) => {
             fill(out, &d);
             0
