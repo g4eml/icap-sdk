@@ -1,11 +1,11 @@
-# q65beacon — segmented, backing-store Q65-60D beacon decoder for the IC-9700 ICAP app.
+# q65beacon — segmented, backing-store Q65 decoder (15/30/60 s, submodes A..E) for the ICAP Q65 app.
 # Links mfsk-core (GPL-3.0-or-later) for the QRA(15,65)/GF(64) FEC + Q65 message codec.
 [package]
 name = "q65beacon"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "Low-RAM segmented Q65-60D decoder (streaming Goertzel front-end + SD backing store) reusing mfsk-core's QRA decoder"
+description = "Low-RAM segmented Q65 decoder (15/30/60 s, A..E) (streaming Goertzel front-end + SD backing store) reusing mfsk-core's QRA decoder"
 
 [lib]
 name = "q65beacon"

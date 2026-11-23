@@ -1,21 +1,44 @@
-# Q65.APP - Q65-60 decoder mode and beacon
+# Q65.APP - Q65 decoder mode (15 / 30 / 60 s) and beacon
 
-Q65-60 decoder (submodes A..E) for the radio's DECODE screen: every UTC minute is captured to the
-SD card and decoded while the next one is captured; WSJT-X style lines
-(`HHMM SNR  DT FREQ :  MESSAGE`), SNR in the WSJT-X 2500 Hz convention. Decodes are reported
-through `@SPOT`. With the beacon armed by the owner, the same app transmits a Q65-60 beacon message
-built from `@MYCALL` / `@MYLOC`, in the Q65-60 submode the owner set on the radio (DECODE › SET ›
-SUBMODE, read from `@MODECFG`).
+Q65 decoder for the radio's DECODE screen, T/R period 15, 30 or 60 s, submodes A..E: every period
+is captured to the SD card and decoded while the next one is captured; WSJT-X style lines
+(`HHMM SNR  DT FREQ :  MESSAGE`, `HHMMSS` for 15 and 30 s), SNR in the WSJT-X 2500 Hz convention.
+Decodes are reported through `@SPOT`.
 
-**QSO mode** (new in 20261119v13; emulation-tested, not yet run on hardware): tap a decoded line
-and the app prints the next message of the standard sequence as `TX? ...`; tap that line and it is
-sent once, in the minute opposite to the other station's. With CQ armed on the radio the app calls
-`CQ <call> <grid4>` in every second minute. A completed QSO is appended to `ICAPQSO.ADI`. QSO
-answers and CQ always go out as **Q65-60D** - the decoder linked here decodes 60D only - whatever
-SUBMODE says (that setting applies to the beacon). Every transmission needs a tap by the owner; see
+**Choosing the mode.** The submode is the one the owner sets on the radio (DECODE › SET ›
+SUBMODE, read from `@MODECFG` before every decode); the period is set in `Q65.CFG`:
+
+```
+period=30
+```
+
+The radio's audio is 8 kHz, so the widest submodes do not fit: Q65-15D and 15E cannot be decoded
+(their 65 tones span 3.5 and 6.9 kHz), nor can 30E except with tone 0 below about 320 Hz; the app
+window says so when one is selected. Everything else decodes: 15A-C, 30A-D, 60A-E.
+
+`Q65.CFG` is optional, one `key=value` per line; the app reads it at start:
+
+| Key | Meaning | Default |
+|---|---|---|
+| `period` | T/R period, s: `15`, `30` or `60` | `60` |
+| `sub` | submode `A`..`E` for decoding, instead of the radio's SUBMODE setting | the radio's |
+| `flo`, `fhi` | tone-0 search range, Hz (span at most 1200 Hz) | 600, 1800 |
+| `cap` | capture length, s (15 s: 14; 30 s: 26..29; 60 s: 52..57) | 14 / 28 / 55 |
+| `beacon`, `call`, `loc`, `txfreq` | beacon settings (see the top of [`q65_705.c`](q65_705.c)) | |
+
+An older file that starts with a number is still read as `fmin fmax [capture_s]`.
+
+**Transmitting stays Q65-60.** With the beacon armed by the owner, the app transmits a Q65-60
+beacon message built from `@MYCALL` / `@MYLOC`, in the submode set on the radio (SUBMODE). The
+radio keys Q65 in 60 s slots, so there is no 15 / 30 s transmission.
+
+**QSO mode** (new in 20261119v13): tap a decoded line and the app prints the next message of the
+standard sequence as `TX? ...`; tap that line and it is sent once, in the minute opposite to the
+other station's. With CQ armed on the radio the app calls `CQ <call> <grid4>` in every second
+minute. A completed QSO is appended to `ICAPQSO.ADI`. QSO answers and CQ always go out as
+**Q65-60D**, so QSO mode is active only while the app decodes Q65-60D (period 60, submode D); in any
+other mode taps on decode lines and CQ are ignored. Every transmission needs a tap by the owner; see
 "QSO mode" in [`../../README.md`](../../README.md) and [`../digi-common/qso.h`](../digi-common/qso.h).
-
-Optional `Q65.CFG`: see the top of [`q65_705.c`](q65_705.c) and [`../../README.md`](../../README.md).
 
 ## Sources and origin
 
@@ -23,10 +46,11 @@ Optional `Q65.CFG`: see the top of [`q65_705.c`](q65_705.c) and [`../../README.m
 |---|---|---|
 | `q65_705.c`, `q65beacon_cb.h`, `stubs.c` | the app (used for both radios): capture, SD-backed decoder callbacks, display, logs | GPL-3.0-or-later |
 | `q65enc.c/.h` | Q65 encoder after WSJT-X `lib/qra/q65/` (`genq65.f90`, `q65.c`, `qracodes.c`, code tables `qra15_65_64_irr_e23.c`) | GPL-3.0-or-later |
-| `decoder/q65beacon/` | the decoder (Rust, `no_std`): streaming low-memory port of the WSJT-X Q65 decode path - one-window FFT front end, Costas sync, fast-fading metric, QRA belief propagation, WSJT-X SNR | GPL-3.0-or-later |
+| `decoder/q65beacon/` | the decoder (Rust, `no_std`): streaming low-memory port of the WSJT-X Q65 decode path for the 15, 30 and 60 s periods, submodes A..E (at 8 kHz all but 15D/15E) - one-window FFT front end, Costas sync, fast-fading metric, QRA belief propagation, WSJT-X SNR | GPL-3.0-or-later |
 | `decoder/mfsk-core-0.10.1-icap.patch` | changes to the **mfsk-core** crate 0.10.1 by its authors, <https://github.com/jl1nie/mfsk-core>, a Rust port of the WSJT-X modes: `no_std` build of the Q65 parts and a per-row fast-fading metric. The decoder uses its QRA(15,65) code tables, fast-fading tables, CRC and Q65 message unpacking. `decoder/build_decoder.sh` downloads the unmodified crate from crates.io (checksum-pinned) and applies the patch | GPL-3.0-or-later |
 | [`../digi-common/`](../digi-common/) | beacon driver, QSO mode, spotting glue, synthesizer, `msg77.c` | GPL-3.0-or-later |
 | `q65_split705.ld`, `q65_split9700.ld`, `mkapp_split.py`, `build.sh` | link scripts, packer and build script (below) | GPL-3.0-or-later / MIT (packer) |
+| [`host/`](host/) | PC test tools: a simulated radio that runs the app and the decoder, and a test-signal generator (not part of `Q65.APP`) | GPL-3.0-or-later |
 
 Q65 and the QRA codes: Nico Palermo **IV3NWV**, Joe Taylor **K1JT**, Steve Franke **K9AN** and the
 WSJT Development Group. Derived from **WSJT-X**, (c) Joe Taylor K1JT et al., GPL-3.0

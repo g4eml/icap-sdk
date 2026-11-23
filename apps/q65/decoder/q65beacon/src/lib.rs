@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! # q65beacon — low-RAM segmented Q65-60D decoder
+//! # q65beacon — low-RAM segmented Q65 decoder
 //!
-//! Milestone-1 port of the WSJT-X Q65-60D decode path to run inside the
-//! IC-9700 ICAP SD app (~48 KB resident window, SD card as scratch).
+//! Port of the WSJT-X Q65 decode path (T/R periods 15, 30 and 60 s, submodes A..E - at 8 kHz all
+//! but 15D/15E, see [`decode`]) to run inside the ICAP SD app (small resident window, SD card as
+//! scratch).  It started as a Q65-60D-only decoder; the numbers quoted below are for 60D.
 //!
 //! The reference path in `mfsk-core` builds a whole-band spectrogram
 //! (819 × 3600 × 4 B = 11.8 MB, cloned once for the noise floor ⇒ a
@@ -45,11 +46,10 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mfsk_core::engine::{DecodeContext, MessageCodec, ModulationParams};
+use mfsk_core::engine::{DecodeContext, MessageCodec};
 use mfsk_core::fec::qra::{lorentz_taps, pdmath};
 use mfsk_core::msg::Q65Message;
 use mfsk_core::msg::q65::unpack_symbols_to_bits77;
-use mfsk_core::q65::Q65d60;
 use mfsk_core::q65::sync_pattern::Q65_SYNC_POSITIONS;
 
 use num_traits::Float;
@@ -105,17 +105,39 @@ const N_DATA: usize = 63;
 const N_TONES: usize = 64;
 const M: usize = 64; // GF(64) alphabet size
 
-// Q65-60D (tone-spacing letter D ⇒ bins_per_tone=8 ⇒ submode index 3).
-// The automatic ("Fast") decode depth in `q65::rx` always runs the
-// fast-fading (Lorentzian) metric over a submode-specific b90 sweep —
-// q65_decode.f90:168-178 gives ibwa=8 for C/D/E, ibwb=min(15,ibwa+6).
-const SUBMODE_IDX: u8 = 3;
-const IBWA: i32 = 8;
-const IBWB: i32 = 14;
+/// Number of b90 steps swept for every submode (`ibwb - ibwa + 1`, see [`ibwa_for_submode`]).
+const N_B90: i32 = 7;
 
-/// Search / alignment parameters for a Q65-60D beacon decode.
+/// Samples per symbol at 12 kHz for a T/R period (WSJT-X `nsps`), `None` for a period this decoder
+/// does not support.  120 s / 300 s are left out: their symbol is not a whole number of samples at
+/// 8 kHz and their windows would not fit the radio's arena.
+fn nsps12_for_period(period_s: u32) -> Option<u32> {
+    match period_s {
+        15 => Some(1800),
+        30 => Some(3600),
+        60 => Some(7200),
+        _ => None,
+    }
+}
+
+/// Submode-specific `b90` sweep lower bound (`ibwa`): the table of mfsk-core `q65::rx`
+/// (after WSJT-X q65_decode.f90:168-178), A = 1, B = 3, C/D/E = 8; `ibwb = min(15, ibwa + 6)`.
+/// The automatic ("Fast") decode depth always runs the fast-fading (Lorentzian) metric over it.
+fn ibwa_for_submode(submode: u8) -> i32 {
+    match submode {
+        0 => 1,
+        1 => 3,
+        _ => 8,
+    }
+}
+
+/// Search / alignment parameters for a Q65 decode.
 #[derive(Clone, Debug)]
 pub struct Params {
+    /// T/R period in seconds: 15, 30 or 60.
+    pub period_s: u32,
+    /// Submode 0..=4 = A..E (tone spacing = 2^submode x baud).
+    pub submode: u8,
     pub sample_rate: u32,
     /// Nominal frame-start sample (the T/R boundary).
     pub nominal_start_sample: usize,
@@ -130,8 +152,10 @@ pub struct Params {
 impl Default for Params {
     fn default() -> Self {
         // Beacon defaults: narrow window around a ~997 Hz tone, the
-        // asymmetric WSJT-X 60-s T/R search window.
+        // asymmetric WSJT-X 60-s T/R search window (Q65-60D).
         Self {
+            period_s: 60,
+            submode: 3,
             sample_rate: FS_REF,
             nominal_start_sample: 0,
             freq_min_hz: 900.0,
@@ -164,23 +188,41 @@ pub struct Decoded {
     pub llh: f32,
 }
 
-/// Geometry derived once from the sub-mode + sample rate.
+/// Geometry derived once from the period, the sub-mode and the sample rate.
+///
+/// The float expressions are those of mfsk-core's `ModulationParams` constants (`SYMBOL_DT =
+/// nsps12 / 12000`, `TONE_SPACING_HZ = 12000 / nsps12 * 2^submode`) evaluated at run time, so
+/// Q65-60D gives exactly the values the `Q65d60` constants gave.
 struct Geom {
     nsps: usize,
     df: f32,
     bpt: usize,
     t_step: usize,
     rows_per_sym: usize,
+    /// Symbol rate, Hz.
+    baud: f32,
+    /// Tone spacing, Hz.
+    spacing: f32,
+    ibwa: i32,
 }
 
 impl Geom {
-    fn new(sample_rate: u32) -> Self {
-        let nsps = (sample_rate as f32 * <Q65d60 as ModulationParams>::SYMBOL_DT).round() as usize;
-        let df = sample_rate as f32 / nsps as f32;
-        let bpt = (<Q65d60 as ModulationParams>::TONE_SPACING_HZ / df).round() as usize;
+    fn new(p: &Params) -> Option<Self> {
+        let nsps12 = nsps12_for_period(p.period_s)?;
+        if p.submode > 4 {
+            return None;
+        }
+        let symbol_dt = nsps12 as f32 / FS_REF as f32;
+        let spacing = (FS_REF as f32 / nsps12 as f32) * (1u32 << p.submode) as f32;
+        let nsps = (p.sample_rate as f32 * symbol_dt).round() as usize;
+        if nsps == 0 {
+            return None;
+        }
+        let df = p.sample_rate as f32 / nsps as f32;
+        let bpt = (spacing / df).round() as usize;
         let t_step = (nsps / 8).max(1);
         let rows_per_sym = (nsps / t_step).max(1);
-        Self { nsps, df, bpt, t_step, rows_per_sym }
+        Some(Self { nsps, df, bpt, t_step, rows_per_sym, baud: 1.0 / symbol_dt, spacing, ibwa: ibwa_for_submode(p.submode) })
     }
 }
 
@@ -190,8 +232,8 @@ fn default_es_no_metric() -> f32 {
     6.0 * (15.0 / 65.0) * eb_no
 }
 
-fn q65_bw_offset_db() -> f32 {
-    10.0 * (2500.0 / <Q65d60 as ModulationParams>::TONE_SPACING_HZ).log10()
+fn q65_bw_offset_db(spacing: f32) -> f32 {
+    10.0 * (2500.0 / spacing).log10()
 }
 
 /// `snr_db_from_sig_noi`, ported from `q65::rx`.
@@ -319,7 +361,7 @@ fn snr_pass<S: SampleSource>(
     let nsps = g.nsps;
     let df = g.df;
     let n_freq = (nsps / 2) as i64;
-    let mode_q65 = ((<Q65d60 as ModulationParams>::TONE_SPACING_HZ / df).round() as i64).max(1);
+    let mode_q65 = ((g.spacing / df).round() as i64).max(1);
     let nsum = (10 * mode_q65).max((50.0 / df).round() as i64).max(1);
     let bb = base_bin as i64;
     let ia = (bb - 2 * nsum).max(0);
@@ -376,7 +418,7 @@ fn snr_pass<S: SampleSource>(
             }
         }
     }
-    let snr_wide = snr_db_from_sig_noi(xsig, xnoi, q65_bw_offset_db());
+    let snr_wide = snr_db_from_sig_noi(xsig, xnoi, q65_bw_offset_db(g.spacing));
     if !q65_ok {
         return Some((snr_wide, snr_wide));
     }
@@ -541,8 +583,12 @@ fn scan_sync<S: SampleSource, L: DebugLog>(
         }
     }
 
-    // Local-max over base bins (neighbourhood = bpt), sort desc, top-N.
-    let mut cands: Vec<Cand> = Vec::with_capacity(nbins / (g.bpt + 1) + 2);
+    // Local-max over base bins (neighbourhood = bpt); only the top-N by sync power are kept, in
+    // descending order (a later equal one goes behind).  Collecting every local maximum first
+    // needed nbins/(bpt+1) entries - 7 KiB for the bpt = 1 submodes (A), on top of the arena: more
+    // than the IC-705's decoder heap has left.
+    let topn = p.max_candidates.max(1);
+    let mut cands: Vec<Cand> = Vec::with_capacity(topn + 1);
     for b in 0..nbins {
         let pwr = best_pwr[b];
         if pwr <= 0.0 {
@@ -555,29 +601,18 @@ fn scan_sync<S: SampleSource, L: DebugLog>(
         }
         let s = row_min + best_si[b] as usize;
         let denom = pwr + noise_floor * Q65_SYNC_POSITIONS.len() as f32;
-        cands.push(Cand {
-            base_bin: fmin_bin + b,
-            freq_hz: (fmin_bin + b) as f32 * g.df,
-            start_sample: s * g.t_step,
-            syncpwr: pwr,
-            score: if denom > 0.0 { pwr / denom } else { 0.0 },
-        });
-    }
-    // Partial selection of the top-N by sync power (avoids pulling the generic merge sort into the
-    // app window).
-    let topn = p.max_candidates.max(1);
-    let n = cands.len();
-    for i in 0..topn.min(n) {
-        let mut m = i;
-        for j in (i + 1)..n {
-            if cands[j].syncpwr > cands[m].syncpwr {
-                m = j;
-            }
+        let pos = cands.iter().position(|o| pwr > o.syncpwr).unwrap_or(cands.len());
+        if pos < topn {
+            cands.insert(pos, Cand {
+                base_bin: fmin_bin + b,
+                freq_hz: (fmin_bin + b) as f32 * g.df,
+                start_sample: s * g.t_step,
+                syncpwr: pwr,
+                score: if denom > 0.0 { pwr / denom } else { 0.0 },
+            });
+            cands.truncate(topn);
         }
-        cands.swap(i, m);
     }
-    cands.truncate(topn);
-    cands.shrink_to_fit();
 
     for (i, c) in cands.iter().enumerate() {
         let mut msg = String::new();
@@ -823,7 +858,11 @@ fn load_spilled<T: SpectraStore, L: DebugLog>(
     true
 }
 
-/// Main entry: decode one captured 60-s minute.
+/// Main entry: decode one captured T/R period (`p.period_s`, `p.submode`).
+///
+/// Supported: periods 15/30/60 s, submodes A..E, as long as the 65 tones plus the fast-fading
+/// margins fit below Nyquist (at 8 kHz: everything but Q65-15D and Q65-15E; Q65-30E fits only with
+/// tone 0 below ~320 Hz).  Anything else returns `None` with an `ABORT where=params` log line.
 ///
 /// Memory: one arena for the whole decode, re-carved per phase -
 /// sync `[front end | row | comb]`, extraction `[front end | row | record | .. | metric blocks]`,
@@ -837,10 +876,15 @@ pub fn decode<S: SampleSource, T: SpectraStore, L: DebugLog>(
     p: &Params,
     mode: Mode<'_>,
 ) -> Option<Decoded> {
-    let g = Geom::new(p.sample_rate);
+    let Some(g) = Geom::new(p) else {
+        log.line("Q65B ABORT where=params reason=unsupported_period_or_submode");
+        return None;
+    };
     {
         let mut msg = String::new();
         fmt_line(&mut msg, "Q65B PARAMS", &[
+            ("period", Num::U(p.period_s as u64)),
+            ("sub", Num::U(p.submode as u64)),
             ("fs", Num::U(p.sample_rate as u64)),
             ("nsps", Num::U(g.nsps as u64)),
             ("bpt", Num::U(g.bpt as u64)),
@@ -850,16 +894,22 @@ pub fn decode<S: SampleSource, T: SpectraStore, L: DebugLog>(
         ]);
         log.line(&msg);
     }
+    let bps = N_TONES * (2 + g.bpt);
+    // The wide window of every data symbol (64 tones + margins) must fit below Nyquist: at 8 kHz this
+    // rules out Q65-15D/E (the 65 tones alone span 3.5 / 6.9 kHz).
+    if bps > g.nsps / 2 {
+        log.line("Q65B ABORT where=params reason=submode_too_wide_for_sample_rate");
+        return None;
+    }
     let total = src.len();
     let sg = sync_geom(total, &g, p, log)?;
 
     let ctx = DecodeContext { callsign_hash_table: None };
     let esno = default_es_no_metric();
-    let baud = 1.0 / <Q65d60 as ModulationParams>::SYMBOL_DT;
-    let bps = N_TONES * (2 + g.bpt);
+    let baud = g.baud;
     // Fast-fading (Lorentzian) metric swept over the submode b90 range - required for
     // Doppler-spread EME.  First ibw to pass CRC wins (matches q65::rx GridDepth::Fast).
-    let fades: Vec<Fade> = (IBWA..=IBWB)
+    let fades: Vec<Fade> = (g.ibwa..g.ibwa + N_B90)
         .map(|ibw| {
             let b90 = 1.72f32.powi(ibw);
             let lt = lorentz_taps(b90 / baud, esno);
@@ -875,7 +925,6 @@ pub fn decode<S: SampleSource, T: SpectraStore, L: DebugLog>(
         })
         .collect();
     let nb = fades.len();
-    let _ = SUBMODE_IDX;
 
     // the arena
     let front = Front::mem_len(g.nsps);

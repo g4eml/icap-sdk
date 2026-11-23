@@ -25,6 +25,7 @@
 //!                     const char* log_path, uint32_t nominal_start_sample,
 //!                     float fmin_hz, float fmax_hz,
 //!                     const int32_t* candidates, uint32_t ncand,
+//!                     uint32_t period_s, uint32_t submode,
 //!                     q65b_result_t* out);
 //! ```
 
@@ -82,6 +83,8 @@ pub unsafe extern "C" fn q65b_decode(
     fmax_hz: f32,
     candidates: *const i32,
     ncand: u32,
+    period_s: u32,
+    submode: u32,
     out: *mut Q65bResult,
 ) -> c_int {
     let Some(out) = (unsafe { out.as_mut() }) else { return -1 };
@@ -95,6 +98,8 @@ pub unsafe extern "C" fn q65b_decode(
     let Ok(mut store) = FileSpectraStore::create(spec) else { return -4 };
 
     let params = Params {
+        period_s,
+        submode: submode.min(255) as u8,
         nominal_start_sample: nominal_start_sample as usize,
         freq_min_hz: fmin_hz,
         freq_max_hz: fmax_hz,

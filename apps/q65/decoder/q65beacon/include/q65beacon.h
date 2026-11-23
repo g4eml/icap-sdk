@@ -32,7 +32,7 @@ typedef struct {
     char     text[32];    /* NUL-terminated decoded message              */
 } q65b_result_t;
 
-/* Decode one captured minute of Q65-60D audio.
+/* Decode one captured T/R period of Q65 audio (period_s 15/30/60, submode 0..4 = A..E).
  *
  *  pcm_path       SD path to raw LE-f32 mono-12kHz capture of the minute
  *  spectra_path   SD scratch path for the streamed narrow sync spectra
@@ -42,6 +42,8 @@ typedef struct {
  *  candidates     flattened ncand*63 int32 template codewords, or NULL
  *                 for blind belief-propagation decode
  *  ncand          number of template codewords (0 for blind)
+ *  period_s       T/R period: 15, 30 or 60 s
+ *  submode        0..4 = A..E (not 15D/15E at 8 kHz)
  *  out            result (must be non-NULL)
  *
  * returns 0 = success & decoded, 1 = ran but no decode, <0 = error
@@ -55,13 +57,15 @@ int32_t q65b_decode(const char   *pcm_path,
                     float         fmax_hz,
                     const int32_t *candidates,
                     uint32_t      ncand,
+                    uint32_t      period_s,
+                    uint32_t      submode,
                     q65b_result_t *out);
 
 /* ---------------------------------------------------------------------
  * Debug-log line format (greppable; one line per stage), written to
  * log_path on the SD card so a failed on-air decode is diagnosable:
  *
- *   Q65B PARAMS  fs= nsps= bpt= nom_start= fmin= fmax=
+ *   Q65B PARAMS  period= sub= fs= nsps= bpt= nom_start= fmin= fmax=
  *   Q65B SPECTRA rows= cols= row_min= row_max_start= noise=
  *   Q65B CAND    i= bin= freq= start= syncpwr= score=      (per candidate)
  *   Q65B ENERGY  bin= wide_bins=

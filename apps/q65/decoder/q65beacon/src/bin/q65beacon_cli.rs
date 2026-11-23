@@ -2,12 +2,13 @@
 //! Host / QEMU harness for q65beacon.
 //!
 //! Usage:
-//!   q65beacon_cli <wav> [--nominal-s S] [--fmin HZ] [--fmax HZ]
+//!   q65beacon_cli <wav> [--period 15|30|60] [--sub A..E]
+//!                 [--nominal-s S] [--fmin HZ] [--fmax HZ]
 //!                 [--mode blind|template]
 //!                 [--call1 C --call2 C --grid G]   (template codewords)
 //!                 [--log PATH]
 //!
-//! Converts the mono 12 kHz WAV to a raw LE-f32 "SD capture" file, then
+//! Default: Q65-60D.  Converts the mono WAV (12 or 8 kHz) to a raw LE-f32 "SD capture" file, then
 //! runs the segmented decoder with SD-backed PCM + sync-spectra stores.
 //! Prints a JSON result line and (with --features meter) the peak live
 //! heap bytes measured over the decode window only.
@@ -114,7 +115,7 @@ fn arg(args: &[String], key: &str) -> Option<String> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: q65beacon_cli <wav> [--nominal-s S] [--fmin HZ] [--fmax HZ] [--mode blind|template] [--call1 C --call2 C --grid G] [--log PATH]");
+        eprintln!("usage: q65beacon_cli <wav> [--period 15|30|60] [--sub A..E] [--nominal-s S] [--fmin HZ] [--fmax HZ] [--mode blind|template] [--call1 C --call2 C --grid G] [--log PATH]");
         std::process::exit(2);
     }
     let wav = &args[1];
@@ -123,6 +124,17 @@ fn main() {
     let fmax: f32 = arg(&args, "--fmax").map(|s| s.parse().unwrap()).unwrap_or(1100.0);
     let mode_s = arg(&args, "--mode").unwrap_or_else(|| "blind".into());
     let logp = arg(&args, "--log");
+    let period_s: u32 = arg(&args, "--period").map(|s| s.parse().unwrap()).unwrap_or(60);
+    let sub_letter = arg(&args, "--sub").unwrap_or_else(|| "D".into()).to_ascii_uppercase();
+    let submode = match sub_letter.as_str() {
+        "A" => 0u8,
+        "B" => 1,
+        "C" => 2,
+        "D" => 3,
+        "E" => 4,
+        _ => panic!("--sub must be A..E"),
+    };
+    let mode_name = format!("Q65-{period_s}{sub_letter}");
 
     // --- setup (outside the measurement window): WAV → SD-capture file.
     let pcm = read_wav(wav);
@@ -155,6 +167,8 @@ fn main() {
     };
 
     let params = q65beacon::Params {
+        period_s,
+        submode,
         sample_rate: unsafe { WAV_RATE },
         nominal_start_sample: (nominal_s * unsafe { WAV_RATE } as f32).round() as usize,
         freq_min_hz: fmin,
@@ -198,8 +212,8 @@ fn main() {
 
     match result {
         Some(d) => println!(
-            "{{\"text\": \"{}\", \"mode\": \"Q65-60D\", \"tone0_hz\": {:.2}, \"dt_s\": {:.3}, \"snr_db\": {:.1}, \"iterations\": {}, \"llh\": {:.1}, \"decode_s\": {:.3}}}",
-            d.text, d.freq_hz, d.dt_s, d.snr_db, d.iterations, d.llh, dt.as_secs_f64()
+            "{{\"text\": \"{}\", \"mode\": \"{}\", \"tone0_hz\": {:.2}, \"dt_s\": {:.3}, \"snr_db\": {:.1}, \"iterations\": {}, \"llh\": {:.1}, \"decode_s\": {:.3}}}",
+            d.text, mode_name, d.freq_hz, d.dt_s, d.snr_db, d.iterations, d.llh, dt.as_secs_f64()
         ),
         None => {
             println!("{{\"text\": null, \"decode_s\": {:.3}}}", dt.as_secs_f64());

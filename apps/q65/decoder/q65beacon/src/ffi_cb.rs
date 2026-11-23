@@ -17,7 +17,7 @@ use crate::debuglog::DebugLog;
 use crate::source::{SampleSource, SpectraStore};
 use crate::{Decoded, Mode, Params};
 
-/// Q65-60D data-symbol count (one template codeword length).  Kept in sync
+/// Q65 data-symbol count (one template codeword length).  Kept in sync
 /// with `crate::N_DATA` (private); the candidate buffer is `ncand * NDATA`.
 const NDATA: usize = 63;
 
@@ -116,13 +116,15 @@ fn fill(out: &mut Q65bResult, d: &Decoded) {
     out.text[n] = 0;
 }
 
-/// Decode one captured minute via SD-backed callbacks.
+/// Decode one captured T/R period via SD-backed callbacks.
 ///
+/// `period_s`: T/R period, 15 / 30 / 60 s; `submode`: 0..=4 = A..E.
 /// `candidates`/`ncand`: flattened `ncand*63` i32 template codewords, or
 /// NULL/0 for a blind belief-propagation decode (the default).
 /// `sample_rate`: capture rate in Hz (0 -> 12000).
 ///
-/// Returns 0 = decoded, 1 = ran but no decode, <0 = bad argument.
+/// Returns 0 = decoded, 1 = ran but no decode (also for an unsupported period / submode, logged as
+/// `Q65B ABORT where=params`), <0 = bad argument.
 ///
 /// # Safety
 /// `cb` and `out` must be valid; `candidates` (if non-NULL) must point to
@@ -130,6 +132,8 @@ fn fill(out: &mut Q65bResult, d: &Decoded) {
 #[no_mangle]
 pub unsafe extern "C" fn q65b_decode_cb(
     cb: *const Q65Cb,
+    period_s: u32,
+    submode: u32,
     nominal_start_sample: u32,
     sample_rate: u32,
     fmin_hz: f32,
@@ -148,6 +152,8 @@ pub unsafe extern "C" fn q65b_decode_cb(
     let mut log = CbLog(cb);
 
     let params = Params {
+        period_s,
+        submode: submode.min(255) as u8,
         nominal_start_sample: nominal_start_sample as usize,
         sample_rate: if sample_rate == 0 { 12_000 } else { sample_rate },
         freq_min_hz: fmin_hz,

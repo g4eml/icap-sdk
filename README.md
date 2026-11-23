@@ -380,7 +380,7 @@ per radio, because the app window, stack and data-region sizes differ.
 Apps are pluggable **decoders** and **beacon transmitters** inside the radio's native UI.
 
 - **RX decode** *(implemented, IC-705 E and IC-9700)*: `icap_audio_read()` → your decoder →
-  `icap_decode_out()` on the native DECODE screen. Reference decoders: Q65-60, FT8, JT4, PI4,
+  `icap_decode_out()` on the native DECODE screen. Reference decoders: Q65 (15/30/60 s), FT8, JT4, PI4,
   WSPR-2 — see [`apps/`](apps/).
 - **Decoder picker** *(implemented)*: the RTTY button cycles through the registered decoder modes.
 - **TX beacons** *(implemented, confirmed on both radios)*: armed by the owner with a long press,

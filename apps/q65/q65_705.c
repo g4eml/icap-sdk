@@ -1,23 +1,31 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  *
- * Q65.APP for the IC-705 - Q65-60D monitor (ICAP ABI 3, split image, decoder mode "Q65").
+ * Q65.APP for the IC-705 - Q65 monitor, T/R period 15, 30 or 60 s, submode A..E (ICAP ABI 3, split image,
+ * decoder mode "Q65").
  *
  * Selected with the RTTY button (RTTY -> RTTY-R -> Q65), the loader switches the radio to USB-D,
- * opens the DECODE screen and starts this app in the background.  Every UTC minute, without gaps:
- *   - from :00 (icap_clock_now, GPS-disciplined on the 705) capture CAP_SECS (default 55 s) of 8 kHz RX
- *     audio (icap_audio_read) to Q65CAPA.PCM / Q65CAPB.PCM alternately (raw s16); ICAP_E_OVERRUN gaps are
- *     zero-filled to their wall-clock length so the time base stays true;
- *   - when minute N's capture ends (:55) its decode starts (q65b_decode_cb, 8000 Hz) and runs while minute
+ * opens the DECODE screen and starts this app in the background.  Every T/R period, without gaps:
+ *   - from the period start (:00 for 60 s; :00/:30; :00/:15/:30/:45 - icap_clock_now, GPS-disciplined on the
+ *     705) capture g_cap_s (default 55 / 28 / 14 s) of 8 kHz RX audio (icap_audio_read) to Q65CAPA.PCM /
+ *     Q65CAPB.PCM alternately (raw s16); ICAP_E_OVERRUN gaps are zero-filled to their wall-clock length so the
+ *     time base stays true;
+ *   - when period N's capture ends its decode starts (q65b_decode_cb, 8000 Hz) and runs while period
  *     N+1 is captured: every decoder callback (PCM read, spectra read/append, log, abort poll) pumps the
  *     audio ring into the other file.  A decode still running when the NEXT capture ends is aborted
- *     (logged) and the next decode starts - no capture is ever lost.  A decode takes ~3 s, no decode ~5 s.
- *   - each decode -> DECODE screen, WSJT-X style "HHMM SNR DT FREQ MESSAGE" with the HHMM of its minute.
+ *     (logged) and the next decode starts - no capture is ever lost.  A 60D decode takes ~3 s, no decode ~5 s;
+ *     the shorter periods take proportionally less.
+ *   - each decode -> DECODE screen, WSJT-X style "HHMM SNR DT FREQ MESSAGE" with the HHMM of its minute
+ *     (HHMMSS of its period for 15 / 30 s).
  * Files open at once: capture write + PCM read + spectra tmp + one transient log write = 4 (loader v11).
  * Logs: Q65DBG.TXT (debug; buffered while a capture is open, flushed between captures or at most every
- * 10 s through the 4th file slot), Q65DEC.TXT (decode log).  Q65.CFG optional: "fmin fmax [capture_s]"
- * (Hz, Hz <= 1200 Hz span, 52..57 s).  The radio's own setting of this mode (loader virtual file "@MODECFG", DECODE
- * screen > SET > SUBMODE, "mode=Q65 sub=D ...") gives the Q65-60 submode A..E of the beacon TX; the decoder linked
- * here is Q65-60D only.
+ * 10 s through the 4th file slot), Q65DEC.TXT (decode log).
+ * Mode: the period is Q65.CFG "period=15|30|60" (default 60); the submode is the radio's own setting of this mode
+ * (loader virtual file "@MODECFG", DECODE screen > SET > SUBMODE, "mode=Q65 sub=D ...", re-read before every decode)
+ * unless Q65.CFG has "sub=A..E".  8 kHz audio cannot carry Q65-15D/15E (or 30E above ~320 Hz): the window says so.
+ * Q65.CFG (optional, key=value): period= sub= flo= fhi= (Hz, <= 1200 Hz span) cap= (s) beacon= call= loc=
+ * txfreq=; a file starting with a number is the old "fmin fmax [capture_s]".
+ * TX is unchanged and Q65-60 only (the radio keys Q65 in 60 s slots): the beacon sends Q65-60 in the SUBMODE
+ * menu's submode; QSO mode (answers and CQ, always Q65-60D) is active only while the app decodes Q65-60D.
  *
  * Memory: segment 1 (.text/.data/.bss) in the 80 KiB app window, segment 2 (.rodata) at the base of
  * the 240 KiB app data region; the rest of the region is one PCM read chunk + the decoder heap (the decoder
@@ -39,15 +47,10 @@ typedef int32_t s32; typedef int16_t s16;
 
 /* ---- configuration ---------------------------------------------------- */
 #define FS          8000u         /* ICAP audio service rate                   */
-#define NSPS        4800u         /* Q65-60 symbol = 0.6 s at 8 kHz            */
-#define CAP_DEF     55u           /* capture length, s (Q65.CFG may change it) */
-#define CAP_MIN     52u
-#define CAP_MAX     57u
 #define DEF_FMIN    600.0f
 #define DEF_FMAX    1800.0f
 #define CHUNK       4096u         /* s16 per SD write / read (8 KiB)           */
 #define DRAIN_N     512u
-#define TX_DT0      1.0f          /* WSJT-X DT reference: Q65 TX starts at t=1 s */
 #define DBG_CAP     2048u         /* was 6144; trimmed (window .bss) so the integrated beacon encoder fits both
                                    * windows without taking any decoder heap - the Rust decoder is untouched */
 #define FLUSH_MS    10000u        /* debug-log flush interval while a capture is open */
@@ -194,24 +197,65 @@ static int bcn_prepare(const char *call, const char *loc, bcn_fill_t *f, void **
     *f = bcn_fill; *c = 0; return 0;
 }
 
-/* ---- Q65.CFG: "fmin fmax [capture_s]" ----------------------------------- */
-static float g_fmin = DEF_FMIN, g_fmax = DEF_FMAX; static u32 g_cap_s = CAP_DEF;
+/* ---- decode mode: T/R period (Q65.CFG period=) and submode (radio SUBMODE menu, or Q65.CFG sub=) ---------
+ * The decoder takes 15 / 30 / 60 s, submodes A..E (at 8 kHz not 15D/15E; 30E only with tone 0 below ~320 Hz).
+ * Derived per period: the frame end (TX start + 85 symbols, WSJT-X: TX starts 0.5 s into a 15/30 s period, 1 s
+ * into a 60 s one) - a capture must reach it to be decoded - and the capture length, whole seconds in
+ * [frame end, period - 1] (60 s: 52..57 as before), default 14 / 28 / 55 s. */
+static u32 g_period = 60;                               /* s */
+static int g_sub = Q65_SUBMODE_DEFAULT;                 /* 0..4 = A..E, the one of the current / next decode */
+static int cfg_sub = -1;                                /* Q65.CFG sub=: -1 = follow the radio's SUBMODE menu */
+static u32 g_frame_n;                                   /* samples from the period start to the frame end */
+static u32 g_cap_s;
+static float g_dt0;                                     /* WSJT-X DT reference: the TX start, s */
+static void mode_init(u32 cap_cfg)
+{
+    u32 tx0 = q65_tx_start_ms((int)g_period);
+    g_dt0 = (float)tx0 * 0.001f;
+    g_frame_n = tx0 * (FS / 1000u) + q65_tx_samples((int)g_period);
+    u32 lo = (g_frame_n + FS - 1u) / FS, hi = g_period == 60u ? 57u : g_period - 1u;
+    g_cap_s = g_period == 15u ? 14u : g_period == 30u ? 28u : 55u;
+    if (cap_cfg >= lo && cap_cfg <= hi) g_cap_s = cap_cfg;
+}
+static void sub_update(void) { g_sub = cfg_sub >= 0 ? cfg_sub : mc_sub(); }
+/* "Q65-30C" */
+static char *mode_name(char *p) { p = fmt_s(p, "Q65-"); p = fmt_u(p, g_period); *p++ = (char)('A' + g_sub); *p = 0; return p; }
+
+/* ---- Q65.CFG ----------------------------------------------------------------------------------------------
+ * key=value, one per line: period=15|30|60  sub=A..E  flo=<Hz> fhi=<Hz> (tone-0 search range)  cap=<s>
+ * (capture length) + the beacon keys (beacon= call= loc= txfreq=).  Older files that start with a number are
+ * read as before: "fmin fmax [capture_s]". */
+static float g_fmin = DEF_FMIN, g_fmax = DEF_FMAX;
 static void read_cfg(void)
 {
-    int fd = icap_open(F_CFG, ICAP_O_READ); if (fd < 0) return;
-    char *buf = g_line; int n = icap_read(fd, buf, 63); icap_close(fd);
-    if (n <= 0) return;
-    u32 v[3]; int vi = 0, i = 0;
-    while (i < n && vi < 3) {
-        while (i < n && (buf[i] < '0' || buf[i] > '9')) i++;
-        if (i >= n) break;
-        u32 acc = 0; while (i < n && buf[i] >= '0' && buf[i] <= '9') { if (acc < 100000u) acc = acc * 10u + (u32)(buf[i] - '0'); i++; }
-        v[vi++] = acc;
+    u32 v[3] = { 0, 0, 0 }; int vi = 0;
+    char b[200]; int fd = icap_open(F_CFG, ICAP_O_READ), n = 0;
+    if (fd >= 0) { n = icap_read(fd, b, (int)sizeof b - 1); icap_close(fd); }
+    if (n < 0) n = 0;
+    b[n] = 0;
+    int i = 0; while (b[i] == ' ' || b[i] == '\t' || b[i] == '\r' || b[i] == '\n') i++;
+    if (b[i] >= '0' && b[i] <= '9') {                    /* the old positional form */
+        while (i < n && vi < 3) {
+            while (i < n && (b[i] < '0' || b[i] > '9')) i++;
+            if (i >= n) break;
+            u32 acc = 0; while (i < n && b[i] >= '0' && b[i] <= '9') { if (acc < 100000u) acc = acc * 10u + (u32)(b[i] - '0'); i++; }
+            v[vi++] = acc;
+        }
+    } else {
+        for (char *s = b; *s; s++) {
+            if (s != b && s[-1] != '\n' && s[-1] != '\r' && s[-1] != ' ' && s[-1] != '\t') continue;
+            int x = b_kint(s);
+            if (b_kmatch(s, "period")) { if (x == 15 || x == 30 || x == 60) g_period = (u32)x; }
+            else if (b_kmatch(s, "sub")) { char t[4]; b_ktok(s, t, sizeof t); if (t[0] >= 'A' && t[0] <= 'E' && !t[1]) cfg_sub = t[0] - 'A'; }
+            else if (b_kmatch(s, "flo") && x >= 0) { v[0] = (u32)x; if (vi < 2) vi = 2; }
+            else if (b_kmatch(s, "fhi") && x >= 0) { v[1] = (u32)x; if (vi < 2) vi = 2; }
+            else if (b_kmatch(s, "cap") && x >= 0) { v[2] = (u32)x; vi = 3; }
+        }
     }
     /* the span is capped at the default 1200 Hz: the decoder heap is sized for it */
     if (vi >= 2 && v[1] > v[0] && v[1] <= 3000u && v[1] - v[0] <= 1200u) { g_fmin = (float)v[0]; g_fmax = (float)v[1]; }
-    if (vi >= 3 && v[2] >= CAP_MIN && v[2] <= CAP_MAX) g_cap_s = v[2];
-    read_cfg_beacon();
+    mode_init(vi >= 3 ? v[2] : 0);
+    if (n) read_cfg_beacon();
 }
 
 /* =====================================================================
@@ -223,7 +267,7 @@ typedef struct {
     u32 need, total, cn;          /* samples wanted / written+buffered / in g_capbuf  */
     u32 pending, streak;          /* overrun seen, not yet zero-filled                */
     u32 ref_t, ref_n, t0;         /* last caught-up point; start tick                 */
-    u32 hh, mm;                   /* the minute being captured                        */
+    u32 hh, mm, ss;               /* the period being captured (its start)            */
     u32 overruns, gaps, zfill, wr_ms, wr_max, late;
     u32 pump_gap;                 /* longest interval between two pumps while capturing (ms) */
     u32 pre;                      /* samples taken from the pre-roll (late :00 detection)    */
@@ -232,14 +276,20 @@ typedef struct {
 } cap_t;
 static cap_t K;
 static int  g_have_clock, g_prev_sec = -1, g_next_file, g_dec_file = -1;
-static u32  g_last_min = 0xFFFFu, g_fr_t0, g_last_pump, g_minutes, g_wait_t;
+static u32  g_last_per = 0xFFFFu, g_fr_t0, g_last_pump, g_minutes, g_wait_t;   /* g_last_per: UTC day period index */
 static volatile int g_ready = -1;                     /* completed capture waiting for its decode */
-static u32  g_ready_hh, g_ready_mm, g_ready_n, g_abort_next, g_dropped;
+static u32  g_ready_hh, g_ready_mm, g_ready_ss, g_ready_n, g_abort_next, g_dropped;
 static u32  g_ready_y, g_ready_mo, g_ready_dd, g_go_y, g_go_mo, g_go_dd, g_wr_errs;
-/* a status line ("HHMM Q65: <what>") -> app window line 4 + the decode log; the DECODE screen gets decodes only */
-static void minute_note(u32 hh, u32 mm, const char *what)
+/* the WSJT-X time stamp of a period: "HHMM" (60 s), "HHMMSS" (15 / 30 s) */
+static char *stamp(char *p, u32 hh, u32 mm, u32 ss)
 {
-    char *p = fmt_u0(g_ln2, hh, 2); p = fmt_u0(p, mm, 2); p = fmt_s(p, " Q65: "); fmt_s(p, what);
+    p = fmt_u0(p, hh, 2); p = fmt_u0(p, mm, 2);
+    return g_period < 60u ? fmt_u0(p, ss, 2) : p;
+}
+/* a status line ("HHMM Q65: <what>") -> app window line 4 + the decode log; the DECODE screen gets decodes only */
+static void minute_note(u32 hh, u32 mm, u32 ss, const char *what)
+{
+    char *p = stamp(g_ln2, hh, mm, ss); p = fmt_s(p, " Q65: "); fmt_s(p, what);
     icap_set_line(4, g_ln2);
     roll_add(g_dec, &g_dec_len, DEC_CAP, g_ln2, z_strlen(g_ln2));
     file_put(F_DEC, g_dec, g_dec_len);
@@ -266,9 +316,9 @@ static void cap_finish(int keep)
     if (K.werr) {                                        /* the file has a hole of unknown size: unusable */
         keep = 0;
         dbg_noflush("Q65B ABORT where=capture reason=sd_write_error");
-        minute_note(K.hh, K.mm, "SD write error");
+        minute_note(K.hh, K.mm, K.ss, "SD write error");
     }
-    { char *p = fmt_s(g_line, "Q65B CAP "); p = fmt_u0(p, K.hh, 2); p = fmt_u0(p, K.mm, 2);
+    { char *p = fmt_s(g_line, "Q65B CAP "); p = stamp(p, K.hh, K.mm, K.ss);
       p = fmt_s(p, " file="); p = fmt_u(p, (u32)K.file); p = fmt_s(p, " samples="); p = fmt_u(p, K.total);
       p = fmt_s(p, " overruns="); p = fmt_u(p, K.overruns); p = fmt_s(p, " gaps="); p = fmt_u(p, K.gaps);
       p = fmt_s(p, " zfill="); p = fmt_u(p, K.zfill); p = fmt_s(p, " wr_ms="); p = fmt_u(p, K.wr_ms);
@@ -276,9 +326,9 @@ static void cap_finish(int keep)
       p = fmt_s(p, " pump_gap_ms="); p = fmt_u(p, K.pump_gap); p = fmt_s(p, " preroll="); p = fmt_u(p, K.pre);
       p = fmt_s(p, " werr="); fmt_u(p, K.werr);
       dbg_noflush(g_line); }
-    if (keep && K.total >= 52u * FS) {
+    if (keep && K.total >= g_frame_n) {                   /* the whole frame is in the file */
         if (g_ready >= 0) { g_dropped++; dbg_noflush("Q65B DROP undecoded capture replaced"); }
-        g_ready_hh = K.hh; g_ready_mm = K.mm; g_ready_n = K.total;
+        g_ready_hh = K.hh; g_ready_mm = K.mm; g_ready_ss = K.ss; g_ready_n = K.total;
         g_ready_y = K.y; g_ready_mo = K.mo; g_ready_dd = K.dd; g_ready = K.file;
         if (g_dec_file >= 0) g_abort_next = 1;           /* the running decode yields to this one */
     } else if (keep) dbg_noflush("Q65B SKIP reason=short_capture");
@@ -303,7 +353,7 @@ static void preroll_read(void)
     }
 }
 /* lag_ms: how long ago :00 was (estimated); that much pre-roll becomes the start of the capture */
-static void cap_start(u32 hh, u32 mm, u32 late, u32 lag_ms)
+static void cap_start(u32 hh, u32 mm, u32 ss, u32 late, u32 lag_ms)
 {
     preroll_read();
     K.file = g_next_file;
@@ -318,7 +368,7 @@ static void cap_start(u32 hh, u32 mm, u32 late, u32 lag_ms)
     K.t0 = K.ref_t = icap_ticks(); K.ref_n = pre;
     K.need = g_cap_s * FS; K.total = pre; K.cn = K.pending = K.streak = 0;
     K.overruns = K.gaps = K.zfill = K.wr_ms = K.wr_max = K.pump_gap = 0; K.late = late; K.pre = pre;
-    K.hh = hh; K.mm = mm; K.y = g_go_y; K.mo = g_go_mo; K.dd = g_go_dd; g_cap_on = 1; g_minutes++;
+    K.hh = hh; K.mm = mm; K.ss = ss; K.y = g_go_y; K.mo = g_go_mo; K.dd = g_go_dd; g_cap_on = 1; g_minutes++;
     if (K.werr) cap_finish(1);                          /* pre-roll write failed: reported, not decoded */
 }
 /* move everything the ring holds into the capture file */
@@ -358,45 +408,47 @@ static void cap_step(void)
     if (K.total >= K.need) cap_finish(1);
     else if (icap_ticks() - K.t0 > K.need / (FS / 1000u) + 3000u) { dbg_noflush("Q65B ABORT where=capture reason=audio_stalled"); cap_finish(1); }
 }
-/* not capturing: watch for :00 (radio clock), else free-run 60 s from launch */
-static u32 g_defer, g_defer_hh, g_defer_mm;
+/* not capturing: watch for the next period start (radio clock; :00 for 60 s, :00/:30 for 30 s, every :15 for 15 s),
+ * else free-run one period from launch */
+static u32 g_defer, g_defer_hh, g_defer_mm, g_defer_ss;
 static u32 g_poll_t, g_edge_t, g_edge_sec, g_edge_ok;       /* RTC second-edge model */
 static void cap_watch(void)
 {
     preroll_read();
-    u32 hh, mm, lag = 0, now = icap_ticks();
+    u32 hh, mm, ss, lag = 0, now = icap_ticks();
     if (g_defer) {                                       /* a start deferred until the old decode let go */
         if (g_next_file == g_dec_file) { g_abort_next = 1; return; }
-        hh = g_defer_hh; mm = g_defer_mm; g_defer = 0;
+        hh = g_defer_hh; mm = g_defer_mm; ss = g_defer_ss; g_defer = 0;
     } else if (g_have_clock) {
         struct icap_time t;
         if (icap_clock_now(&t) != 0) return;
-        u32 mk = (u32)t.hour * 60u + t.min;
+        u32 pk = ((u32)t.hour * 3600u + (u32)t.min * 60u + t.sec) / g_period;   /* period of the day */
         /* every observed second edge with a short poll interval refines where the RTC second starts */
         if (g_prev_sec >= 0 && (u32)g_prev_sec != t.sec) {
             u32 w = now - g_poll_t;
             if (w <= 40u || !g_edge_ok || now - g_edge_t > 20000u) { g_edge_t = now - w / 2u; g_edge_sec = t.sec; g_edge_ok = 1; }
         }
-        int go = t.sec == 0 && (g_prev_sec > 0 || (g_prev_sec < 0 && mk != g_last_min));
+        /* a period start: its first second, seen as an edge (or, right after a capture, a period not yet captured) */
+        int go = t.sec % g_period == 0 && (g_prev_sec >= 0 ? (u32)g_prev_sec != t.sec : pk != g_last_per);
         g_prev_sec = t.sec; g_poll_t = now;
         if (!go) return;
-        hh = t.hour; mm = t.min; g_last_min = mk;
+        hh = t.hour; mm = t.min; ss = t.sec; g_last_per = pk;
         g_go_y = t.year; g_go_mo = t.mon; g_go_dd = t.day;
-        if (g_edge_ok && now - g_edge_t < 20000u) {     /* :00 predicted from the last good edge */
-            u32 t00 = g_edge_t + ((60u - g_edge_sec) % 60u) * 1000u;
+        if (g_edge_ok && now - g_edge_t < 20000u) {     /* the period start predicted from the last good edge */
+            u32 t00 = g_edge_t + ((g_period - g_edge_sec % g_period) % g_period) * 1000u;
             lag = (s32)(now - t00) > 0 ? now - t00 : 0;
             if (lag > 1000u) lag = 0;                    /* model stale: start now */
         }
     } else {
-        if (g_last_min != 0xFFFFu && now - g_fr_t0 < 60000u) return;
-        g_last_min = 0; g_fr_t0 = now; hh = mm = 0;
+        if (g_last_per != 0xFFFFu && now - g_fr_t0 < g_period * 1000u) return;
+        g_last_per = 0; g_fr_t0 = now; hh = mm = ss = 0;
     }
     if (g_next_file == g_dec_file) {                     /* never truncate the file being decoded */
-        g_abort_next = 1; g_defer = 1; g_defer_hh = hh; g_defer_mm = mm; g_wait_t = now - lag;
+        g_abort_next = 1; g_defer = 1; g_defer_hh = hh; g_defer_mm = mm; g_defer_ss = ss; g_wait_t = now - lag;
         return;
     }
     u32 late = g_wait_t ? now - g_wait_t : lag; g_wait_t = 0;
-    cap_start(hh, mm, late, late);
+    cap_start(hh, mm, ss, late, late);
 }
 /* the audio pump: called everywhere (rate-limited to 10 ms unless forced) */
 static u32 g_last_call;
@@ -515,6 +567,7 @@ static u32 g_last_yield, g_abort_polls, g_last_poll, g_poll_gap;
 /* P4b: QSO mode (qso.h, included below).  Thumb: the 9700 window is nearly full, and none of it is hot. */
 #define QSO_FN static __attribute__((noinline, optimize("Os"), target("thumb")))
 QSO_FN int qso_poll(void);
+static int qso_gate(void);
 static int cb_should_abort(void *ctx)
 {
     (void)ctx;
@@ -523,7 +576,7 @@ static int cb_should_abort(void *ctx)
     pump(0);
     u32 now = icap_ticks();
     if (now - g_last_yield >= 20u) { g_last_yield = now; icap_yield(); }
-    return stop() || g_abort_next || g_io_err || qso_poll();   /* P4b: our QSO transmission is due */
+    return stop() || g_abort_next || g_io_err || qso_gate();   /* P4b: our QSO transmission is due */
 }
 static void cb_log(void *ctx, const char *s, size_t len)
 {
@@ -534,12 +587,12 @@ static void cb_log(void *ctx, const char *s, size_t len)
 }
 
 /* ---- decode one completed capture ---------------------------------------- */
-static void minute_line(char *p, u32 hh, u32 mm, const q65b_result_t *r)
+static void minute_line(char *p, u32 hh, u32 mm, u32 ss, const q65b_result_t *r)
 {
-    /* WSJT-X layout: HHMM%4d%5.1f%5d :  msg  (':' = WSJT-X Q65 marker) */
-    char *q = fmt_u0(p, hh, 2); q = fmt_u0(q, mm, 2);
+    /* WSJT-X layout: HHMM[SS]%4d%5.1f%5d :  msg  (':' = WSJT-X Q65 marker) */
+    char *q = stamp(p, hh, mm, ss);
     char *a = q; q = fmt_i(q, iround(r->snr_db)); q = pad_to(a, q, 4);
-    float dt = r->dt_s - TX_DT0; s32 d10 = iround(dt * 10.0f);
+    float dt = r->dt_s - g_dt0; s32 d10 = iround(dt * 10.0f);
     a = q; if (d10 < 0) { *q++ = '-'; d10 = -d10; }
     q = fmt_u(q, (u32)d10 / 10u); *q++ = '.'; *q++ = (char)('0' + (u32)d10 % 10u); *q = 0;
     q = pad_to(a, q, 5);
@@ -548,16 +601,27 @@ static void minute_line(char *p, u32 hh, u32 mm, const q65b_result_t *r)
     fmt_s(q, r->text);
 }
 static u32 g_ndec;
+static void show_title(void)                            /* app window line 0: "Q65-30C monitor (IC-705)" */
+{
+    char *p = mode_name(g_ln2); p = fmt_s(p, " monitor ("); p = fmt_s(p, icap_is_ic9700() ? "IC-9700)" : "IC-705)");
+    icap_set_line(0, g_ln2);
+    /* too wide for 8 kHz audio: the decoder refuses it (Q65-30E only below ~320 Hz, so not here either) */
+    if ((g_period == 15u && g_sub >= 3) || (g_period == 30u && g_sub == 4)) {
+        p = mode_name(g_ln2); fmt_s(p, " is too wide to decode: set SUBMODE A-C (15 s) / A-D (30 s)");
+        icap_set_line(4, g_ln2);
+    }
+}
 static void decode_one(void)
 {
-    int file = g_ready; u32 hh = g_ready_hh, mm = g_ready_mm, n = g_ready_n;
+    int file = g_ready; u32 hh = g_ready_hh, mm = g_ready_mm, ss = g_ready_ss, n = g_ready_n;
     u32 y = g_ready_y, mo = g_ready_mo, dd = g_ready_dd;
     g_ready = -1; g_dec_file = file; g_abort_next = 0; g_io_err = 0;
     g_pcm_name = F_CAP[file];
     g_pcm.total = n; g_pcm.fd = -1; g_pcm.base = g_pcm.len = 0; g_pcm_reopen = 0;
     g_spec.fd = -1; g_spec.writing = 0; g_spec.nrows = g_spec.ncols = g_spec.cur_row = 0;
     g_abort_polls = 0; g_last_yield = g_last_poll = icap_ticks(); g_poll_gap = 0;
-    { char *p = fmt_s(g_line, "Q65B DECODE "); p = fmt_u0(p, hh, 2); p = fmt_u0(p, mm, 2); p = fmt_s(p, " file="); fmt_u(p, (u32)file); dbg(g_line); }
+    { int old = g_sub; sub_update(); if (g_sub != old) show_title(); }   /* the owner may change SUBMODE at any time */
+    { char *p = fmt_s(g_line, "Q65B DECODE "); p = stamp(p, hh, mm, ss); *p++ = ' '; p = mode_name(p); p = fmt_s(p, " file="); fmt_u(p, (u32)file); dbg(g_line); }
     icap_set_line(2, "decoding");
     q65b_cb_t cb;
     cb.ctx = 0; cb.pcm_len = cb_pcm_len; cb.pcm_read = cb_pcm_read;
@@ -566,7 +630,7 @@ static void decode_one(void)
     cb.log_line = cb_log; cb.should_abort = cb_should_abort;
     q65b_result_t r; r.ok = 0; r.text[0] = 0;
     u32 td = icap_ticks();
-    int rc = q65b_decode_cb(&cb, 0, FS, g_fmin, g_fmax, 0, 0, &r);
+    int rc = q65b_decode_cb(&cb, g_period, (u32)g_sub, 0, FS, g_fmin, g_fmax, 0, 0, &r);
     td = icap_ticks() - td;
     free_dec_fds();
     g_dec_file = -1;
@@ -574,7 +638,7 @@ static void decode_one(void)
     logkv("Q65B DECPOLL", "polls", (s32)g_abort_polls, "max_gap_ms", (s32)g_poll_gap, 0, 0);
     if (rc == 0 && r.ok) {
         g_ndec++;
-        minute_line(g_ln2, hh, mm, &r);
+        minute_line(g_ln2, hh, mm, ss, &r);
         icap_decode_out(g_ln2);
         spot_emit("Q65", r.text, r.freq_hz, iround(r.snr_db));   /* report to the loader @SPOT service (loader adds dial+UTC+gate) */
         char *p = g_line;
@@ -587,15 +651,15 @@ static void decode_one(void)
         dbg("Q65B ABORT where=decode reason=stop");
     } else if (g_io_err) {
         logkv("Q65B ABORT where=decode reason=sd_read_error", "ms", (s32)td, "open_err", (s32)g_open_err, 0, 0);
-        minute_note(hh, mm, "SD read error");
+        minute_note(hh, mm, ss, "SD read error");
     } else if (g_abort_next) {
         logkv("Q65B ABORT where=decode reason=next_capture", "ms", (s32)td, "polls", (s32)g_abort_polls, 0, 0);
-        minute_note(hh, mm, "decode out of time");
+        minute_note(hh, mm, ss, "decode out of time");
     } else {
         dbg("Q65B OUT no decode");
     }
     g_abort_next = 0;
-    { char *p = fmt_s(g_line, "minutes "); p = fmt_u(p, g_minutes); p = fmt_s(p, "  decodes "); fmt_u(p, g_ndec); icap_set_line(3, g_line); }
+    { char *p = fmt_s(g_line, "periods "); p = fmt_u(p, g_minutes); p = fmt_s(p, "  decodes "); fmt_u(p, g_ndec); icap_set_line(3, g_line); }
 }
 
 /* drop the capture / decode state: before a beacon session (the minute being captured is lost while the radio
@@ -637,12 +701,21 @@ static int qso_enc(const char *msg, int tone)
 static int qso_stream(void) { return bcn_stream(bcn_fill, 0, (int16_t *)(uintptr_t)(g_hb + 1024u), 160); }
 static char *qso_modetag(char *d) { return bcn_cpy(d, "<MODE:4>MFSK <SUBMODE:3>Q65 "); }
 #include "qso.h"
+/* QSO mode only while the app decodes Q65-60D: its answers and CQ go out as Q65-60D (the radio's Q65 TX slot is 60 s).
+ * In any other decode mode the loader's QSO file is not read (a tap on a decode row does nothing, CQ is not called);
+ * a QSO in progress is dropped and the tap counter resynchronised when it comes back. */
+static int qso_gate(void)
+{
+    if (g_period == 60u && g_sub == 3) return qso_poll();
+    if (Q.init || Q.have || Q.due) { qso_cancel(); Q.have = 0; Q.init = 0; }
+    return 0;
+}
 
 int app_main(const struct icap_svc *svc)
 {
     icap_use(svc);
     g_pcm.fd = -1; g_spec.fd = -1; K.fd = -1; g_cap_on = 0; g_ready = -1; g_dec_file = -1;
-    g_dbg_len = 0; g_dec_len = 0; g_last_min = 0xFFFFu; g_prev_sec = -1; g_next_file = 0;
+    g_dbg_len = 0; g_dec_len = 0; g_last_per = 0xFFFFu; g_prev_sec = -1; g_next_file = 0;
     if (!ICAP_HAS(audio_read) || !icap_heap_size()) {
         icap_print("Q65 needs ICAP v1rc (audio + data region)");
         while (!stop()) icap_sleep_ms(200);
@@ -668,7 +741,9 @@ int app_main(const struct icap_svc *svc)
     char mode[8]; if (icap_mode(mode, sizeof mode) <= 0) fmt_s(mode, "-");
     read_cfg();
     logkv("Q65B BOOT fw705 v6-bcnswitch", "heap", (s32)hs, "cache", (s32)cache_b, "dec_heap", (s32)dec_heap);
+    sub_update();
     logkv("Q65B CFG", "fmin", (s32)g_fmin, "fmax", (s32)g_fmax, "cap_s", (s32)g_cap_s);
+    logkv("Q65B CFG", "period", (s32)g_period, "sub", g_sub, "cfg_sub", cfg_sub);
     logkv("Q65B AUDIO", "rate", rate, "clock", g_have_clock, "abi", (s32)svc->abi_version);
     { char *p = fmt_s(g_line, "Q65B MODE "); fmt_s(p, mode); dbg(g_line); }
     if (rate != (int)FS) dbg("Q65B WARN audio rate is not 8000 Hz - decoding at 8000 anyway");
@@ -686,14 +761,14 @@ int app_main(const struct icap_svc *svc)
             if (stop()) break;
             cap_idle(); dbg("Q65B BCN off");
         }
-        icap_clear(); icap_set_line(0, icap_is_ic9700() ? "Q65-60D monitor (IC-9700)" : "Q65-60D monitor (IC-705)");
-        if (!g_have_clock) icap_set_line(4, "no radio clock - free-running 60 s from launch");
+        icap_clear(); show_title();
+        if (!g_have_clock) icap_set_line(4, "no radio clock - free-running from launch");
         if (dec_heap < DEC_HEAP_MIN) icap_set_line(4, "decoder heap too small");
         icap_audio_read(g_drain, 1);                    /* first read starts the loader's capture */
         while (!stop()) {
             if (bcn_want_poll(cfg_beacon, 1000)) break; /* the owner armed the beacon (checked between decodes) */
             pump(1);
-            if (qso_poll()) { qso_run(); continue; }    /* P4b: the granted QSO / CQ transmission, once */
+            if (qso_gate()) { qso_run(); continue; }    /* P4b: the granted QSO / CQ transmission, once */
             if (g_ready >= 0) { decode_one(); continue; }
             icap_sleep_ms(20);
         }
@@ -701,7 +776,7 @@ int app_main(const struct icap_svc *svc)
     }
     free_dec_fds();
     if (g_cap_on) cap_finish(0);
-    logkv("Q65B EXIT", "minutes", (s32)g_minutes, "decodes", (s32)g_ndec, "open_err", (s32)g_open_err);
+    logkv("Q65B EXIT", "periods", (s32)g_minutes, "decodes", (s32)g_ndec, "open_err", (s32)g_open_err);
     flush_dbg();
     return 0;
 }
