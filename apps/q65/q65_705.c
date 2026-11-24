@@ -731,7 +731,7 @@ int app_main(const struct icap_svc *svc)
     g_pcm.fd = -1; g_spec.fd = -1; K.fd = -1; g_cap_on = 0; g_ready = -1; g_dec_file = -1;
     g_dbg_len = 0; g_dec_len = 0; g_last_per = 0xFFFFu; g_prev_sec = -1; g_next_file = 0;
     if (!ICAP_HAS(audio_read) || !icap_heap_size()) {
-        icap_print("Q65 needs ICAP v1rc (audio + data region)");
+        icap_print("Q65 needs ICAP v1rc firmware");     /* the window shows 32 characters */
         while (!stop()) icap_sleep_ms(200);
         return -1;
     }
@@ -777,7 +777,7 @@ int app_main(const struct icap_svc *svc)
             cap_idle(); dbg("Q65B BCN off");
         }
         icap_clear(); show_title();
-        if (!g_have_clock) icap_set_line(4, "no radio clock - free-running from launch");
+        if (!g_have_clock) icap_set_line(4, "no radio clock: free-running");
         if (dec_heap < DEC_HEAP_MIN) icap_set_line(4, "decoder heap too small");
         icap_audio_read(g_capbuf, 1);                   /* first read starts the loader's capture (not capturing:
                                                          * g_capbuf is the pre-roll ring) */

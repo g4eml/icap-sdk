@@ -219,7 +219,7 @@ static void bcn_run(const char *modename, bcn_prepare_t prepare,
     q = bcn_cpy(line, modename); bcn_cpy(q, " beacon");
     icap_set_line(0, line);
     if (!icap_tx_available()) {
-        icap_set_line(2, "beacon: no TX in this runtime (old loader)");
+        icap_set_line(2, "beacon: no TX (old loader)");
         while (!icap_should_stop() && (bcn_follow < 0 || bcn_want_poll(bcn_follow, 1000))) icap_sleep_ms(200);
         return;
     }
@@ -228,11 +228,11 @@ static void bcn_run(const char *modename, bcn_prepare_t prepare,
         if (bcn_follow >= 0 && !bcn_want(bcn_follow)) return;   /* disarmed (long press OFF / owner abort) */
         char call[16], loc[12];
         if (!(ovr_call && ovr_call[0] ? (bcn_cpy(call, ovr_call), 1) : bcn_vfline("@MYCALL", call, (int)sizeof call))) {
-            if (last_warn != 0) { icap_set_line(2, "beacon idle: set MY call (and grid)"); last_warn = 0; }
+            if (last_warn != 0) { icap_set_line(2, "beacon idle: set call + grid"); last_warn = 0; }
             icap_sleep_ms(500); continue;
         }
         if (!(ovr_loc && ovr_loc[0] ? (bcn_cpy(loc, ovr_loc), 1) : bcn_vfline("@MYLOC", loc, (int)sizeof loc))) {
-            if (last_warn != 1) { icap_set_line(2, "beacon idle: set grid (GPS/Manual)"); last_warn = 1; }
+            if (last_warn != 1) { icap_set_line(2, "beacon idle: set grid (GPS/Man)"); last_warn = 1; }
             icap_sleep_ms(500); continue;
         }
         bcn_fill_t fill; void *ctx; const char *err = "encode error";
