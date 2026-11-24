@@ -16,6 +16,10 @@ SD card does not have to come out to edit the file.
 The submode stays with the radio's own setting (DECODE › SET › SUBMODE). Q65SET only changes the
 period.
 
+On the IC-705 the Apps menu lists at most 8 apps, and the release bundle already has 8: remove one
+you do not use (e.g. `CLOCK.APP`) or Q65SET does not appear (see the SDK
+[`README.md`](../../README.md)).
+
 ## What it does to Q65.CFG
 
 - `period=` becomes the first line (Q65.APP reads only the start of the file); every other line is

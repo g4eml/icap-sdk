@@ -358,6 +358,14 @@ probe with e.g. `icap_tx_available()` or `icap_audio_rate() > 0`.
   compiler flags is in [`examples/hello/`](examples/hello/) (`build.sh`).
 - Copy the `*.APP` to the radio's app folder and start it from **MENU › SET ›
   Apps**.
+- **At most 8 apps on the IC-705** (observed, not a documented limit): the loader lists
+  no more than 8 `*.APP` files from the app folder, and it gives no warning about the rest -
+  an app past the limit is simply missing from the Apps menu (and its decoder modes from the
+  RTTY button). The IC-705 release bundle already has 8 apps, so make room for a new one by
+  removing apps you do not use (`CLOCK.APP` and `SYSINFO.APP` are examples / bench tools;
+  `APRS.APP` is only needed for GPS TX Mode APRS). Not determined on the IC-9700.
+- **One app at a time:** while an app runs, starting another from the Apps menu shows the
+  running app's window instead; STOP it first.
 - **Autostart:** to run an app automatically at power-on, put its file name on the
   first line of `AUTORUN.CFG` in the same folder (e.g. `Q65.APP`). It starts about
   15 s after boot, once per power cycle; the Apps status row then shows `(auto)` and
